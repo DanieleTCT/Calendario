@@ -1,0 +1,62 @@
+.wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; background: var(--surface); }
+.banner {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: .7rem 1.1rem; flex-shrink: 0;
+  background: linear-gradient(120deg,#312e81,#4f46e5 60%,#7c3aed);
+  color: white;
+}
+.dow { font-size: .72rem; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; opacity: .85; }
+.dfull { font-size: 1.15rem; font-weight: 800; text-transform: capitalize; }
+.count { background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.3); padding: .3rem .8rem; border-radius: 999px; font-size: .8rem; font-weight: 700; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; }
+/* Assi invertiti: giorno verticale a sx + ore orizzontali */
+.body { flex: 1; min-height: 0; overflow: auto; background: var(--surface); }
+.hinner { min-width: 760px; }
+.hhead { display: grid; border-bottom: 1px solid var(--gray-200); background: var(--surface-2); position: sticky; top: 0; z-index: 5; }
+.hcorner { font-size: .65rem; font-weight: 800; color: var(--gray-500); display: flex; align-items: center; padding: .45rem .6rem; background: var(--surface-2); border-right: 1.5px solid #475569; }
+.hhcell { display: flex; align-items: center; justify-content: center; font-size: .68rem; font-weight: 700; color: var(--gray-400); padding: .45rem 0; border-left: 1px solid var(--gray-100); }
+.hrow { display: grid; min-height: 84px; border-bottom: 1px solid var(--gray-200); }
+.hdayLabel { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; background: var(--surface); border-right: 1.5px solid #475569; }
+.hdow { font-size: .72rem; font-weight: 800; text-transform: capitalize; color: var(--gray-700); }
+.hcount { font-size: .68rem; color: var(--gray-500); }
+.htimeline { position: relative; display: flex; align-items: stretch; min-height: 84px; }
+.hcellH { flex-shrink: 0; border: none; border-left: 1.5px solid #475569; background: #fff; cursor: pointer; position: relative; padding: 0; min-height: 84px; }
+.hcellH:hover { background: #eef2ff; }
+.hcellH:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.plus { position: absolute; left: 50%; top: 6px; transform: translateX(-50%); font-size: .7rem; font-weight: 700; color: var(--primary); opacity: 0; transition: opacity .15s; pointer-events: none; z-index: 1; }
+.hcellH:hover .plus { opacity: 1; }
+.halfV { position: absolute; top: 0; bottom: 0; left: 50%; width: 0; border-left: 1px solid #cbd5e1; pointer-events: none; }
+.evt { position: absolute; top: 10px; min-height: 40px; max-height: 64px; border-radius: 10px; color: white; padding: 6px 10px; overflow: hidden; box-shadow: 0 4px 14px rgba(15,23,42,.22); border-top: 4px solid rgba(255,255,255,.7); z-index: 2; cursor: pointer; }
+.etime { font-size: .68rem; font-weight: 800; opacity: .9; }
+.etitle { font-size: .88rem; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.edesc { font-size: .72rem; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Lezioni PoliTO */
+.politoEvt { border-left-width: 5px; border-left-style: solid; }
+.exEvt { border-left-style: dashed !important; }
+/* Scadenza task: forma dedicata */
+.deadlineEvt {
+  border-left-width: 6px !important;
+  border-left-style: double !important;
+  border-radius: 6px 16px 16px 6px !important;
+  border-top: 2px solid rgba(15,23,42,.25);
+  border-right: 2px solid rgba(15,23,42,.25);
+  border-bottom: 2px solid rgba(15,23,42,.25);
+}
+.now { position: absolute; top: 0; bottom: 0; width: 2px; background: #ef4444; z-index: 3; pointer-events: none; }
+.now i { position: absolute; top: -1px; left: -4px; width: 10px; height: 10px; border-radius: 50%; background: #ef4444; }
+.program { border-top: 1px solid var(--gray-200); background: var(--surface-2); padding: .7rem .9rem; display: flex; flex-direction: column; gap: .5rem; max-height: 220px; overflow-y: auto; flex-shrink: 0; }
+.program h4 { font-size: .72rem; text-transform: uppercase; letter-spacing: .07em; color: var(--gray-500); }
+.empty { font-size: .8rem; color: var(--gray-500); }
+/* Fascia tutto il giorno / scadenze task (FIX: mai nascosti dalla timeline) */
+.alldayStrip { flex-shrink: 0; border-bottom: 1px solid var(--gray-200); background: var(--surface-2); padding: .5rem .9rem; display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
+.alldayLabel { font-size: .7rem; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; color: var(--gray-500); white-space: nowrap; }
+.alldayList { display: flex; gap: .4rem; flex-wrap: wrap; flex: 1; min-width: 0; }
+.alldayChip { border: 1px solid var(--gray-300); border-radius: 8px; padding: .35rem .6rem; font-size: .76rem; font-weight: 700; cursor: pointer; max-width: 280px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.alldayChip:hover { filter: brightness(.97); }
+.alldayDone { text-decoration: line-through; opacity: .65; }
+.item { display: flex; gap: .6rem; background: var(--surface); border: 1px solid var(--gray-200); border-radius: 10px; padding: .55rem .65rem; }
+.item b { display: block; font-size: .8rem; }
+.item small { color: var(--gray-500); font-size: .7rem; }
+.bar { width: 4px; border-radius: 4px; flex-shrink: 0; }
+@media (max-width: 900px) { .hcorner { display: none; } }
+

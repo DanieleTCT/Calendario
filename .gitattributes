@@ -1,0 +1,11 @@
+# Normalizzazione line ending: il progetto viene deployato su Linux (Docker/NAS/Vercel).
+# LF per tutto, CRLF solo per gli script Windows.
+* text=auto eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.woff2 binary

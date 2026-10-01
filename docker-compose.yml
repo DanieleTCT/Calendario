@@ -1,0 +1,50 @@
+# Sito-calendario — deploy NAS locale, accesso solo LAN + VPN (Tailscale/WireGuard).
+# NESSUN port-forward sul router. Il NAS resta invisibile da internet.
+services:
+  calendario:
+    build:
+      context: .
+      args:
+        # Il frontend chiama lo stesso host: niente localhost hardcoded.
+        VITE_API_URL: /api
+    image: sito-calendario:latest
+    container_name: sito-calendario
+    restart: unless-stopped
+    ports:
+      # Solo LAN/VPN. Da fuori casa: http://<nome-ou-ip-tailscale-nas>:8080
+      - "8080:3000"
+    env_file:
+      - .env
+    environment:
+      PORT: "3000"
+      DATA_DIR: /app/data
+    volumes:
+      # Persistenza DB JSON + backup + conversazioni (sopravvive a rebuild/upgrade)
+      - calendario-data:/app/data
+    extra_hosts:
+      # Permette al container di raggiungere Ollama sul PC in LAN:
+      # OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Profilo opzionale: Ollama sul NAS (solo CPU, lento, per test senza PC).
+  # Avvio: docker compose --profile ollama-cpu up -d
+  # Poi OLLAMA_BASE_URL=http://ollama:11434
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sito-calendario-ollama
+    restart: unless-stopped
+    profiles: ["ollama-cpu"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  calendario-data:
+  ollama-models:

@@ -1,0 +1,11 @@
+node_modules
+dist
+data
+*.backup-*
+.env
+.git
+.gitignore
+
+# Docker: non inviare al demone
+Dockerfile
+docker-compose.yml

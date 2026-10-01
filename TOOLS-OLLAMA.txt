@@ -1,0 +1,83 @@
+================================================================================
+SITO-CALENDARIO - LISTA TOOL PER MODELLI OLLAMA / AI ASSISTANT
+File: TOOLS-OLLAMA.txt - Data: 2026-09-24
+================================================================================
+COME FUNZIONA IL TOOL CALLING
+--------------------------------------------------------------------------------
+1) NATIVO (qwen2.5, llama3.1+, mistral-nemo) - POST /api/chat Ollama:
+   {"model":"<modello>","messages":[{"role":"system","content":"..."},
+   {"role":"user","content":"..."}],"stream":false,
+   "options":{"temperature":0.2,"num_predict":1024,"num_ctx":4096},
+   "tools":[{"type":"function","function":{"name":"<tool>","description":"...","parameters":{...}}}]}
+   Risposta: message.tool_calls=[{"function":{"name":"<tool>","arguments":{...}}}]
+
+2) FALLBACK JSON (mistral:7b, phi, orca-mini senza tools nativi):
+   Rispondi UNA sola riga JSON valida:
+   {"toolCalls": [{"name": "<nome_tool>", "input": {...}}], "reply": "<testo utente>"}
+   Se nessun tool: {"toolCalls": [], "reply": "<risposta>"}
+   Parser accetta varianti: tool_calls|calls, name|function.name|tool,
+   input|arguments|args|parameters (anche stringa JSON), reply|content.
+
+3) REGOLE: date YYYY-MM-DD, orari HH:mm. Reply solo testo semplice
+   (vietato * # _ ` markdown; elenchi con "-"; evidenzia in MAIUSCOLO).
+   LETTURA = subito. MODIFICA = crea RICHIESTA APPROVAZIONE (pulsanti).
+
+ELENCO RAPIDO (12 tool):
+ LETTURA: calendar_query_range, calendar_search, calendar_find_free_slots, tasks_list, memory_get, ask_user
+ MODIFICA (approvazione): calendar_create_item, calendar_update_item, calendar_delete_item, tasks_create, tasks_complete, memory_set
+================================================================================
+DETTAGLIO TOOL 1-6 LETTURA
+================================================================================
+1) calendar_query_range [LETTURA] - eventi/task in intervallo.
+   required: startDate(YYYY-MM-DD), endDate(YYYY-MM-DD). optional: type=event|task|all
+   ex: {"toolCalls":[{"name":"calendar_query_range","input":{"startDate":"2026-09-24","endDate":"2026-09-30","type":"all"}}],"reply":"Cerco settimana."}
+   ritorna: [{id,type,title,date,startTime,endTime,category,completed}]
+
+2) calendar_search [LETTURA] - ricerca titolo/descrizione/categoria.
+   required: query(string). optional: limit(number,default 10)
+   ex: {"toolCalls":[{"name":"calendar_search","input":{"query":"riunione","limit":10}}],"reply":"Cerco riunione."}
+   ritorna: [{id,type,title,date,startTime,completed}]
+
+3) calendar_find_free_slots [LETTURA] - slot liberi in una data.
+   required: date(YYYY-MM-DD). optional: startHour(0-23,def 8), endHour(def 20), slotDurationMinutes(def 30)
+   ex: {"toolCalls":[{"name":"calendar_find_free_slots","input":{"date":"2026-09-25","startHour":8,"endHour":20,"slotDurationMinutes":30}}],"reply":"Controllo slot."}
+   ritorna: {"date":"2026-09-25","freeSlots":["08:00","08:30",...]}
+
+4) tasks_list [LETTURA] - task per stato.
+   optional: status=all|open|completed|overdue(def all), limit(def 20)
+   ex: {"toolCalls":[{"name":"tasks_list","input":{"status":"open","limit":20}}],"reply":"Elenco task aperti."}
+   ritorna: [{id,title,date,completed,category}]
+
+5) memory_get [LETTURA] - legge memoria (stub ritorna null).
+   required: key(string)
+   ex: {"toolCalls":[{"name":"memory_get","input":{"key":"preferenze_utente"}}],"reply":"Recupero memoria."}
+
+6) ask_user [LETTURA] - chiede chiarimento, pausa fino a risposta.
+   required: question(string). optional: options(array string)
+   ex ask_user: {"toolCalls":[{"name":"ask_user","input":{"question":"Per che data?"}}],"reply":"Serve data."}
+================================================================================
+DETTAGLIO TOOL 7-12 MODIFICA (creano pending action da approvare)
+================================================================================
+7) calendar_create_item - crea evento/task. required: type=event|task, title, date.
+   optional: description, startTime(HH:mm), endTime, allDay(bool,def false), category(def general), recurrence=none|daily|weekly|monthly(def none)
+   ex: {"toolCalls":[{"name":"calendar_create_item","input":{"type":"event","title":"Riunione Team","date":"2026-09-25","startTime":"09:00","endTime":"10:00","category":"lavoro"}}],"reply":"Proposto evento, conferma dai pulsanti."}
+
+8) calendar_update_item - modifica (serve id da query/search). required: id.
+   optional: title, description, date, startTime, endTime, completed(bool)
+   ex: {"toolCalls":[{"name":"calendar_update_item","input":{"id":"abc-123","startTime":"10:00","endTime":"11:00"}}],"reply":"Proposto spostamento, conferma."}
+
+9) calendar_delete_item - elimina. required: id(string)
+   ex: {"toolCalls":[{"name":"calendar_delete_item","input":{"id":"abc-123"}}],"reply":"Proposta eliminazione, conferma."}
+
+10) tasks_create - scorciatoia task. required: title, date. optional: description, category(def general), reminderMinutes(def 1440)
+   ex: {"toolCalls":[{"name":"tasks_create","input":{"title":"Comprare latte","date":"2026-09-26"}}],"reply":"Proposto task, conferma."}
+
+11) tasks_complete - completa/riapre. required: id, completed(bool true/false, NON stringa)
+   ex: {"toolCalls":[{"name":"tasks_complete","input":{"id":"abc-123","completed":true}}],"reply":"Proposto completamento, conferma."}
+
+12) memory_set - salva memoria (stub). required: key(string), value(object)
+   ex: {"toolCalls":[{"name":"memory_set","input":{"key":"preferenze","value":{"tema":"scuro"}}}],"reply":"Proposto salvataggio."}
+
+MULTI-TOOL ex: {"toolCalls":[{"name":"calendar_query_range","input":{"startDate":"2026-09-24","endDate":"2026-10-08","type":"all"}},{"name":"tasks_list","input":{"status":"open"}}],"reply":"Preparo agenda."}
+ERRORI COMUNI: non inventare id (usa search/query prima); date solo YYYY-MM-DD; numeri come numeri non stringhe; completed boolean; una sola riga JSON nel fallback; niente markdown in reply.
+RIFERIMENTI CODICE: packages/agent/src/tools.ts, tool-exec.ts, providers/ollama-provider.ts, apps/api/src/routes/ai.ts.

@@ -1,0 +1,10 @@
+export { DemoProvider } from './providers/demo-provider';
+export { GeminiProvider } from './providers/gemini-provider';
+export { OpenRouterProvider } from './providers/openrouter-provider';
+export { OllamaProvider } from './providers/ollama-provider';
+export { LocalOpenAIProvider } from './providers/local-provider';
+export { ProviderChain, type ProviderChainConfig } from './provider-chain';
+export type { AiProvider, ProviderSession, ProviderSessionOptions } from './types';
+export { createTools, toGeminiFunctionDeclarations, toOpenAITools, OLLAMA_JSON_FALLBACK_SUFFIX } from './tools';
+export { executeTool, applyApprovedAction, describeAction, runReadOnlyTool } from './tool-exec';
+export type { ToolContext, ToolResult } from './tools';

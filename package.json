@@ -1,0 +1,29 @@
+{
+  "name": "calendario-ai-workspace",
+  "version": "1.0.0",
+  "description": "AI-powered calendar application",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@calendario/api & npm run dev --workspace=@calendario/web",
+    "dev:api": "npm run dev --workspace=@calendario/api",
+    "dev:web": "npm run dev --workspace=@calendario/web",
+    "build": "npm run build --workspaces --if-present",
+    "build:api": "node scripts/build-api.mjs",
+    "test:serverless": "node scripts/build-api.mjs && node scripts/test-serverless.mjs",
+    "test:supabase-mock": "tsx scripts/test-supabase-mock.ts",
+    "test:supabase": "tsx scripts/test-supabase.ts",
+    "test": "npm run test --workspace=@calendario/domain --workspace=@calendario/storage --workspace=@calendario/agent",
+    "lint": "npm run lint --workspaces --if-present",
+    "clean": "npm run clean --workspaces"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "eslint": "^8.55.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.7.0"
+  }
+}

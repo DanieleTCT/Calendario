@@ -1,0 +1,32 @@
+.layout { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.header {
+  background: linear-gradient(120deg, #312e81 0%, #4f46e5 55%, #06b6d4 130%);
+  color: white; padding: .8rem 1.5rem;
+  display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+  flex-shrink: 0; box-shadow: 0 2px 12px rgba(49,46,129,.25); z-index: 20;
+}
+.headerLeft { display: flex; align-items: center; gap: .8rem; min-width: 0; }
+.hamburger {
+  width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+  background: rgba(255,255,255,.16); color: white; font-size: 1.15rem; line-height: 1;
+  border: 1px solid rgba(255,255,255,.25); transition: var(--transition);
+  display: flex; align-items: center; justify-content: center;
+}
+.hamburger:hover { background: rgba(255,255,255,.32); }
+.hamburger:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.headerContent h1 { font-size: 1.25rem; font-weight: 800; letter-spacing: -.01em; }
+.headerContent p { font-size: .78rem; opacity: .8; }
+.dateNavigator {
+  display: flex; gap: .6rem; align-items: center;
+  background: rgba(255,255,255,.16); padding: .3rem .6rem;
+  border-radius: 999px; border: 1px solid rgba(255,255,255,.2);
+}
+.dateNavigator button {
+  width: 30px; height: 30px; border-radius: 50%;
+  background: rgba(255,255,255,.2); color: white; font-size: 1rem; line-height: 1;
+  transition: var(--transition);
+}
+.dateNavigator button:hover { background: rgba(255,255,255,.4); }
+.dateNavigator span { font-size: .85rem; min-width: 110px; text-align: center; font-weight: 600; }
+@media (max-width: 700px) { .headerContent p { display: none; } .dateNavigator span { min-width: 90px; } }
+

@@ -1,0 +1,199 @@
+.container {
+  padding: 1.5rem;
+  height: 100%;
+  overflow-y: auto;
+  max-width: 700px;
+}
+
+.container h2 {
+  font-size: 1.5rem;
+  color: var(--gray-900);
+  margin-bottom: 1.5rem;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.section {
+  background: white;
+  padding: 1.5rem;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.section h3 {
+  font-size: 1.125rem;
+  color: var(--gray-900);
+  margin-bottom: 1rem;
+  border-bottom: 2px solid var(--primary);
+  padding-bottom: 0.5rem;
+}
+
+.section p {
+  color: var(--gray-600);
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.section a {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.formGroup:last-child {
+  margin-bottom: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 640px) {
+  .row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.formGroup label {
+  font-weight: 600;
+  color: var(--gray-800);
+  font-size: 0.95rem;
+}
+
+.formGroup input,
+.formGroup select {
+  padding: 0.75rem;
+  border: 1px solid var(--gray-300);
+  border-radius: var(--radius);
+  font-size: 0.95rem;
+  transition: var(--transition);
+}
+
+.formGroup input:focus,
+.formGroup select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.formGroup input:disabled {
+  background: var(--gray-100);
+  color: var(--gray-500);
+  cursor: not-allowed;
+}
+
+.formGroup input[type="range"] {
+  padding: 0;
+  accent-color: var(--primary);
+}
+
+.checkbox {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+}
+
+.checkbox input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.formGroup small {
+  color: var(--gray-500);
+  font-size: 0.85rem;
+  margin-top: 0.25rem;
+}
+
+.hint {
+  background: var(--gray-50);
+  padding: 1rem;
+  border-radius: var(--radius);
+  border-left: 4px solid var(--warning);
+  color: var(--gray-700);
+  font-size: 0.9rem;
+  margin: 0 !important;
+}
+
+.message {
+  padding: 1rem;
+  border-radius: var(--radius);
+  font-weight: 500;
+}
+
+.message.success,
+.success {
+  background: #d1fae5;
+  color: #065f46;
+  border-left: 4px solid var(--success);
+}
+
+.message.error,
+.error {
+  background: #fee2e2;
+  color: #991b1b;
+  border-left: 4px solid var(--danger);
+}
+
+/* Righe di due campi affiancati (es. opzioni PoliTO) */
+.formRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 640px) {
+  .formRow { grid-template-columns: 1fr; }
+}
+
+/* Checkbox con label (visibilità PoliTO per vista) */
+.toggleTasks {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--gray-600);
+  cursor: pointer;
+}
+
+.toggleTasks input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.submitButton {
+  padding: 1rem;
+  background: var(--primary);
+  color: white;
+  border-radius: var(--radius);
+  font-size: 1rem;
+  font-weight: 600;
+  transition: var(--transition);
+  cursor: pointer;
+}
+
+.submitButton:hover {
+  background: var(--primary-dark);
+}
+
+.submitButton:active {
+  transform: scale(0.98);
+}

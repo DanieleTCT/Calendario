@@ -1,0 +1,55 @@
+.wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--surface); overflow: hidden; }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: auto; }
+.inner { min-width: 760px; }
+.headRow {
+  display: grid;
+  flex-shrink: 0; border-bottom: 1px solid var(--gray-200); background: var(--surface);
+  position: sticky; top: 0; z-index: 5;
+}
+.corner { font-size: .65rem; font-weight: 800; color: var(--gray-500); display: flex; align-items: center; padding: .45rem .6rem; background: var(--surface-2); border-right: 1.5px solid #475569; position: sticky; left: 0; z-index: 6; }
+.hhead { display: flex; align-items: center; justify-content: center; font-size: .68rem; font-weight: 700; color: var(--gray-400); padding: .45rem 0; border-left: 1px solid var(--gray-100); }
+/* Righe giorno: label verticale a sx + timeline ore orizzontale */
+.dayRow { display: grid; border-bottom: 1px solid var(--gray-200); min-height: 64px; }
+.dayToday { background: var(--primary-soft); }
+.dayLabel { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: .45rem .3rem; background: var(--surface); border-right: 1.5px solid #475569; position: sticky; left: 0; z-index: 4; }
+.dow { font-size: .68rem; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; color: var(--gray-500); }
+.dnum { font-size: 1.05rem; font-weight: 800; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border-radius: 50%; color: var(--gray-800); }
+.dnumToday { background: linear-gradient(135deg,#4f46e5,#7c3aed); color: white; box-shadow: 0 2px 8px rgba(79,70,229,.4); }
+/* Timeline orizzontale: celle ora affiancate, eventi posizionati con left/width % */
+.timeline { position: relative; display: flex; align-items: stretch; min-height: 64px; }
+.hcell {
+  flex-shrink: 0; border: none; border-left: 1.5px solid #475569;
+  background: #fff; cursor: pointer; position: relative; padding: 0; min-height: 64px;
+}
+.hcell:hover { background: #eef2ff; }
+.hcell:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.halfV {
+  position: absolute; top: 0; bottom: 0; left: 50%; width: 0;
+  border-left: 1px solid #cbd5e1; pointer-events: none;
+}
+.evt {
+  position: absolute; top: 8px; min-height: 30px; max-height: 48px; border-radius: 8px; color: white;
+  padding: 4px 7px; font-size: .72rem; overflow: hidden;
+  box-shadow: 0 2px 8px rgba(15,23,42,.2); border-top: 3px solid rgba(255,255,255,.6);
+  display: flex; flex-direction: column; gap: 1px; cursor: pointer; z-index: 2;
+}
+.evt b { font-size: .72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.evt small { opacity: .9; font-size: .64rem; }
+/* Lezioni PoliTO: bordo tratteggiato sulle esercitazioni, badge aula */
+.politoEvt { border-left-width: 4px; border-left-style: solid; }
+.exEvt { border-left-style: dashed !important; }
+/* Scadenza task: forma dedicata — angoli asimmetrici + bordo doppio spesso */
+.deadlineEvt {
+  border-left-width: 5px !important;
+  border-left-style: double !important;
+  border-radius: 4px 14px 14px 4px !important;
+  border-top: 2px solid rgba(15,23,42,.25);
+  border-right: 2px solid rgba(15,23,42,.25);
+  border-bottom: 2px solid rgba(15,23,42,.25);
+}
+.now { position: absolute; top: 0; bottom: 0; width: 2px; background: #ef4444; z-index: 3; pointer-events: none; }
+.now i { position: absolute; top: -1px; left: -4px; width: 10px; height: 10px; border-radius: 50%; background: #ef4444; }
+/* Tutto il giorno / scadenze dentro la riga giorno (assi invertiti) */
+.alldayChip { border: 1px solid var(--gray-300); border-radius: 6px; padding: .15rem .35rem; font-size: .66rem; font-weight: 700; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; background: var(--surface-2); margin-top: 34px; max-width: 160px; }
+.alldayMore { font-size: .62rem; color: var(--gray-500); }
+

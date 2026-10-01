@@ -1,0 +1,99 @@
+.container {
+  padding: 1.5rem;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.container h2 {
+  font-size: 1.5rem;
+  color: var(--gray-900);
+  margin-bottom: 1.5rem;
+}
+
+.sections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.5rem;
+}
+
+.section {
+  background: white;
+  padding: 1.5rem;
+  border-radius: var(--radius-lg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.section h3 {
+  font-size: 1.125rem;
+  color: var(--gray-800);
+  margin-bottom: 1rem;
+  border-bottom: 2px solid var(--primary);
+  padding-bottom: 0.5rem;
+}
+
+.empty {
+  color: var(--gray-500);
+  text-align: center;
+  padding: 2rem 1rem;
+  font-size: 0.95rem;
+}
+
+.taskList {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.taskCard {
+  display: flex;
+  gap: 1rem;
+  padding: 1rem;
+  background: var(--gray-50);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.taskCard:hover {
+  background: var(--gray-100);
+}
+
+.taskCheckbox {
+  font-size: 1.25rem;
+  min-width: 24px;
+  text-align: center;
+  color: var(--primary);
+}
+
+.taskInfo {
+  flex: 1;
+}
+
+.taskTitle {
+  font-weight: 500;
+  color: var(--gray-900);
+  margin-bottom: 0.25rem;
+}
+
+.taskTitle.completed {
+  text-decoration: line-through;
+  color: var(--gray-500);
+}
+
+.taskDate {
+  font-size: 0.875rem;
+  color: var(--gray-500);
+}
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+.topbar h2 { margin: 0; }
+.search { padding: .55rem .9rem; border: 1px solid var(--gray-300); border-radius: 999px; font-size: .88rem; min-width: 220px; }
+.filters { display: flex; gap: .5rem; margin-bottom: 1.25rem; flex-wrap: wrap; }
+.filterBtn { padding: .4rem .9rem; border-radius: 999px; border: 1px solid var(--gray-200); background: #fff; font-size: .82rem; font-weight: 700; color: var(--gray-500); cursor: pointer; }
+.filterBtn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.taskCard.overdue { border-left: 4px solid #ef4444; }
+.overdueBadge { background: #fee2e2; color: #991b1b; font-weight: 700; padding: .05rem .45rem; border-radius: 999px; font-size: .72rem; }
+.taskDesc { font-size: .82rem; color: var(--gray-600); margin-top: .25rem; }
+.editHint { color: var(--gray-400); font-size: .9rem; }
+.taskCard { text-align: left; width: 100%; border: 1px solid transparent; }
+.taskCheckbox { background: none; border: none; cursor: pointer; font-size: 1.25rem; min-width: 28px; }
+.taskCheckbox:hover { transform: scale(1.15); }
