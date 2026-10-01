@@ -252,6 +252,9 @@ npm test
 
 ## 📦 Deploy
 
+> 📖 **Guida passo-passo completa**: [`DEPLOY-VERCEL.md`](DEPLOY-VERCEL.md)
+> (include la risposta al prompt *"Multiple applications detected in this directory"*).
+
 ### ☁️ Vercel + Supabase (accesso da ovunque)
 1. Supabase: New Project → SQL Editor → esegui `supabase/schema.sql`
    (crea 4 tabelle JSONB; idempotente). Copia `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`
