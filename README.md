@@ -259,11 +259,15 @@ npm test
 1. Supabase: New Project → SQL Editor → esegui `supabase/schema.sql`
    (crea 4 tabelle JSONB; idempotente). Copia `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`
    (Project Settings → API; la service role resta SOLO sul server).
-2. Vercel: importa il repo (Root Directory = repo root). `vercel.json` è già pronto:
-   - Build: `npm run build --workspace=@calendario/web && node scripts/build-api.mjs`
-   - Output: `apps/web/dist`, `framework: null` (routing solo da vercel.json)
-   - Function `api/index.js` (memory 1024, maxDuration 60) + rewrite `/api/:path*` → `/api`
-     e fallback SPA `/(.*)` → `/index.html`
+2. Vercel: importa il repo come **UN progetto in Services** (Root Directory = repo root).
+   `vercel.json` definisce già i due servizi e il routing:
+   - **`web`** → `root: apps/web`, framework Vite, output `dist`, pubblico su **`/`**
+     (fallback SPA `/(.*)` → `/index.html`)
+   - **`api`** → `root: .`, framework Express, entrypoint `api/index.js`, pubblico su **`/api`**
+     (build `node scripts/build-api.mjs`, function con memory 1024 e `maxDuration` 60)
+   - rewrites: `/api` e `/api/(.*)` → `{ "service": "api" }`, poi `/(.*)` → `{ "service": "web" }`
+   - **nessuna service binding**: l'unico collegamento è il browser che chiama `/api`
+     sullo stesso dominio (stessa origine → niente CORS)
    - Env vars: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`,
      `OPENROUTER_API_KEY`, `ALLOWED_ORIGIN=https://<tuo>.vercel.app`
      (`VITE_API_URL` può restare vuota: il frontend usa `/api` relativo)
@@ -271,7 +275,7 @@ npm test
 4. Limiti del serverless (progettati e gestiti):
    - niente Ollama / modelli su `localhost` (il cloud non vede il tuo PC)
    - niente sync PoliTO automatico: resta manuale (`POST /api/polito/sync`) o via Vercel Cron
-   - chat SSE entro `maxDuration` (60s in `vercel.json`)
+   - chat SSE entro `maxDuration` (60s, in `services.api.functions`)
    - il filesystem è read-only → se `SUPABASE_*` manca l'API risponde con un errore esplicito
      invece di perdere dati silenziosamente
    Dettagli in `NAS-README.md` (Opzione A) e `.env.vercel.example`.
