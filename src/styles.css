@@ -104,3 +104,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 @media (max-width: 440px) {
   .topbar-brand { display: none; }.topbar-left { gap: 2px; }.topbar-actions { gap: 4px; }.view-switch button { padding: 0 5px; }.date-heading { font-size: 13px; }.week-header, .all-day-row { grid-template-columns: 32px repeat(7, minmax(0, 1fr)); }.time-column { width: 32px; flex-basis: 32px; }.day-heading { font-size: 7px; }.day-heading strong { width: 21px; height: 21px; font-size: 10px; }.time-label { font-size: 7px; }.item-modal { padding: 18px 15px 14px; }.modal-field input { width: 170px; }.auth-card, .setup-card { padding: 30px 23px 24px; }
 }
+
+.hour-cell {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-top: 1px solid #f0f0f5;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color .15s ease;
+}
+.hour-cell:hover { background: #f4f2ff; }
+.day-column-today .hour-cell:hover { background: #efedff; }
+.copy-button { width: 34px; height: 34px; border: 1px solid #e8e6f4; background: #fff; color: var(--purple); }
+.copy-button:hover { border-color: #d7d3f8; background: #f5f3ff; }
+@media (max-width: 760px) and (hover: none) {
+  .month-add { display: grid; opacity: 1; color: var(--purple); background: #f7f6ff; }
+}
