@@ -452,7 +452,7 @@ function App() {
               <button className={view === 'week' ? 'view-active' : ''} onClick={() => setView('week')}>Settimana</button>
               <button className={view === 'month' ? 'view-active' : ''} onClick={() => setView('month')}>Mese</button>
             </div>
-            <button className="icon-button help-button" title="Aiuto" onClick={() => setNotice('Clicca su un giorno o su Crea per aggiungere eventi, task e lezioni.')}><CircleHelp size={19} /></button>
+            <button className="icon-button help-button" title="Aiuto" onClick={() => setNotice('Seleziona un orario nella settimana o un giorno nel mese, oppure usa Crea, per aggiungere eventi, task e lezioni.')}><CircleHelp size={19} /></button>
             <div className="avatar top-avatar">{(user.email?.[0] ?? 'F').toLocaleUpperCase('it-IT')}</div>
           </div>
         </header>
@@ -653,7 +653,7 @@ function WeekCalendar({
       </div>
       <div className="all-day-row">
         <div className="all-day-label">Tutto<br />il giorno</div>
-        {days.map((day) => <div className="all-day-cell" key={day.toISOString()} onDoubleClick={() => onCreate(day)}>
+        {days.map((day) => <div className="all-day-cell" key={day.toISOString()}>
           {allDayItems.filter((item) => isSameDay(parseISO(item.starts_at), day)).map((item) => <CalendarItemChip key={item.id} item={item} onEdit={onEdit} onToggleTask={onToggleTask} compact />)}
         </div>)}
       </div>
@@ -661,15 +661,18 @@ function WeekCalendar({
         <div className="time-column">{HOURS.map((hour) => <div className="time-label" key={hour}>{format(new Date(2020, 0, 1, hour), 'HH:mm')}</div>)}</div>
         <div className="week-grid">
           {days.map((day) => (
-            <div className={`day-column ${isToday(day) ? 'day-column-today' : ''}`} key={day.toISOString()} onDoubleClick={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect()
-              const offset = Math.max(0, event.clientY - rect.top)
-              const hour = Math.min(22, 7 + Math.floor(offset / 64))
-              const newDate = new Date(day)
-              newDate.setHours(hour, 0, 0, 0)
-              onCreate(newDate)
-            }}>
-              {HOURS.map((hour) => <div className="hour-cell" key={hour} />)}
+            <div className={`day-column ${isToday(day) ? 'day-column-today' : ''}`} key={day.toISOString()}>
+              {HOURS.map((hour) => <button
+                type="button"
+                className="hour-cell"
+                key={hour}
+                aria-label={`Crea un elemento ${format(day, 'EEEE d MMMM', { locale: it })} alle ${format(new Date(2020, 0, 1, hour), 'HH:mm')}`}
+                onClick={() => {
+                  const newDate = new Date(day)
+                  newDate.setHours(hour, 0, 0, 0)
+                  onCreate(newDate)
+                }}
+              />)}
               {timedItems.filter((item) => isSameDay(parseISO(item.starts_at), day)).map((item) => {
                 const start = parseISO(item.starts_at)
                 const end = parseISO(item.ends_at)
