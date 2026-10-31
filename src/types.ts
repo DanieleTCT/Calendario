@@ -41,17 +41,25 @@ export interface FamilyCalendar {
   name: string
 }
 
+export type MiiPartKey = 'hair' | 'ears' | 'eyes' | 'eyebrows' | 'nose' | 'mouth' | 'beard' | 'glasses' | 'blush' | 'mole'
+
+export interface MiiPlacement {
+  x: number
+  y: number
+  scale: number
+  rotate: number
+}
+
 export interface MiiConfig {
   background: number
   faceShape: number
   skin: number
   hairStyle: number
   hairColor: number
+  earStyle: number
   eyeStyle: number
   eyeColor: number
   eyeSpacing: number
-  eyeSize: number
-  eyeTilt: number
   eyebrowStyle: number
   noseStyle: number
   mouthStyle: number
@@ -61,6 +69,7 @@ export interface MiiConfig {
   blush: boolean
   mole: boolean
   shirt: number
+  placements: Record<MiiPartKey, MiiPlacement>
 }
 
 export interface UserProfile {

@@ -219,9 +219,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .mii-preview-face { width: 200px; height: 200px; border-radius: 50%; overflow: hidden; box-shadow: 0 10px 30px #27234018; }
 .mii-random { gap: 6px; color: var(--purple); }
 .mii-panel { display: flex; min-width: 0; flex-direction: column; gap: 12px; }
-.mii-tabs { display: flex; gap: 4px; padding: 3px; border-radius: 9px; background: #f5f5f9; }
-.mii-tabs button { flex: 1; height: 30px; border: 0; border-radius: 6px; background: transparent; color: #8c8c9a; font-size: 11px; font-weight: 600; cursor: pointer; }
+.mii-tabs { display: flex; flex-wrap: wrap; gap: 3px; padding: 3px; border-radius: 9px; background: #f5f5f9; }
+.mii-tabs button { flex: 1 1 auto; height: 28px; padding: 0 7px; border: 0; border-radius: 6px; background: transparent; color: #8c8c9a; font-size: 10px; font-weight: 600; cursor: pointer; }
 .mii-tabs .mii-tab-active { background: #fff; color: var(--purple-dark); box-shadow: 0 1px 5px #24224112; }
+.mii-placement { display: flex; flex-direction: column; gap: 9px; padding: 11px 12px; border: 1px dashed #d9d7f2; border-radius: 10px; background: #fbfbff; }
+.mii-placement-title { color: var(--purple-dark); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.mii-placement .text-button { align-self: flex-end; }
+
 .mii-controls { display: flex; flex-direction: column; gap: 12px; max-height: 330px; overflow-y: auto; padding-right: 4px; }
 .mii-control { display: flex; flex-direction: column; gap: 6px; color: #59596b; font-size: 11px; font-weight: 600; }
 .mii-stepper { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
