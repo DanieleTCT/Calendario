@@ -152,6 +152,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .catalog-title-filter { grid-column: span 2; }
 .catalog-submit { min-height: 40px; margin-bottom: 8px; }
 .catalog-summary { color: #777487; font-size: 12px; }
+.catalog-shelf { margin-top: 20px !important; margin-bottom: 20px !important; }
+.catalog-shelf-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 0 18px; }
+.catalog-shelf-heading h3 { margin: 0; color: #302d49; font: 700 17px Manrope, sans-serif; }
+.catalog-shelf-heading span { color: #8d8a9c; font-size: 11px; }
+.catalog-empty { padding: 0 18px; color: #89869a; font-size: 12px; }
+.catalog-more { display: block; min-width: 150px; margin: 0 auto 16px; }
+.catalog-more:disabled { opacity: .6; }
+.catalog-name-search { margin-top: 18px; }
+.catalog-name-search .catalog-search { padding-bottom: 6px; }
 .catalog-grid { display: flex; gap: 14px; overflow-x: auto; overscroll-behavior-inline: contain; padding: 8px 18px 18px; scroll-snap-type: x mandatory; scrollbar-color: #b7b2df #f2f1f8; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
 .catalog-card { min-width: 0; flex: 0 0 clamp(145px, 18vw, 190px); overflow: hidden; border: 1px solid #ececf3; border-radius: 12px; background: #fff; scroll-snap-align: start; box-shadow: 0 4px 14px #28234908; }
 .watch-cover { display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover; background: #eeecfa; border-radius: 8px; }

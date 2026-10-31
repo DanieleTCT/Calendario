@@ -11,6 +11,19 @@ type WatchItem = { id: string; title: string; category: Category; tags: string[]
 type Vote = { item_id: string; user_id: string; liked: boolean; rating: number | null }
 type CatalogTypeFilter = 'all' | 'film' | 'serie'
 type CatalogItem = { id: number; title: string; category: 'film' | 'serie'; poster_path: string | null; release_date: string | null; genre_ids: number[] }
+type BrowseMode = 'trending' | 'new' | 'discover'
+type CatalogFilters = { type: CatalogTypeFilter; year: string; genre: string; tag: string }
+type CatalogShelf = { mode: BrowseMode; title: string; items: CatalogItem[]; page: number; totalPages: number; loading: boolean }
+
+const BROWSE_SHELVES: { mode: BrowseMode; title: string }[] = [
+  { mode: 'trending', title: 'In tendenza questa settimana' },
+  { mode: 'new', title: 'Novità e prossime uscite' },
+  { mode: 'discover', title: 'Esplora tutto il catalogo' },
+]
+
+function emptyShelves(): CatalogShelf[] {
+  return BROWSE_SHELVES.map((shelf) => ({ ...shelf, items: [], page: 0, totalPages: 0, loading: false }))
+}
 
 const CATALOG_GENRES: { id: number; name: string; type: 'film' | 'serie' | 'all' }[] = [
   { id: 12, name: 'Avventura', type: 'film' },
@@ -66,6 +79,39 @@ function catalogGenreNames(item: Pick<CatalogItem, 'genre_ids' | 'category'>) {
   })
 }
 
+function filterCatalogItems(items: CatalogItem[], filters: CatalogFilters) {
+  return items.filter((entry) => {
+    if (filters.year && entry.release_date?.slice(0, 4) !== filters.year) return false
+    if (filters.genre && !entry.genre_ids.includes(Number(filters.genre))) return false
+    return true
+  })
+}
+
+function filterCatalogText(items: CatalogItem[], text: string) {
+  const filter = text.trim().toLocaleLowerCase('it-IT')
+  if (!filter) return items
+  return items.filter((entry) => [entry.title, entry.category, ...catalogGenreNames(entry)]
+    .some((value) => value.toLocaleLowerCase('it-IT').includes(filter)))
+}
+
+function CatalogCard({ entry, added, busy, onAdd }: {
+  entry: CatalogItem
+  added: boolean
+  busy: boolean
+  onAdd: () => void
+}) {
+  const genres = catalogGenreNames(entry)
+  return <article className="catalog-card" key={`${entry.category}-${entry.id}`}>
+    <Cover path={entry.poster_path} title={entry.title} />
+    <div className="catalog-card-copy">
+      <strong>{entry.title}</strong>
+      <p>{entry.category === 'film' ? 'Film' : 'Serie TV'}{entry.release_date ? ` · ${entry.release_date.slice(0, 4)}` : ''}</p>
+      {genres.length > 0 && <p className="catalog-card-genres">{genres.join(' · ')}</p>}
+      <button disabled={busy || added} onClick={onAdd}>{added ? 'Aggiunto' : 'Aggiungi alla lista'}</button>
+    </div>
+  </article>
+}
+
 export function WatchDecider({ calendarId, userId, canEdit, members }: {
   calendarId: string; userId: string; canEdit: boolean; members: CalendarMember[]
 }) {
@@ -80,7 +126,9 @@ export function WatchDecider({ calendarId, userId, canEdit, members }: {
   const [catalogYear, setCatalogYear] = useState('')
   const [catalogGenre, setCatalogGenre] = useState('')
   const [catalogTagFilter, setCatalogTagFilter] = useState('')
-  const [catalogOpen, setCatalogOpen] = useState(false)
+  const [catalogOpen, setCatalogOpen] = useState(true)
+  const [appliedCatalogFilters, setAppliedCatalogFilters] = useState<CatalogFilters>({ type: 'all', year: '', genre: '', tag: '' })
+  const [shelves, setShelves] = useState<CatalogShelf[]>(emptyShelves)
   const [results, setResults] = useState<CatalogItem[]>([])
   const [catalogPage, setCatalogPage] = useState(0)
   const [catalogPages, setCatalogPages] = useState(0)
@@ -94,6 +142,7 @@ export function WatchDecider({ calendarId, userId, canEdit, members }: {
   const pointerStart = useRef<number | null>(null)
   const sequence = useRef(0)
   const searchSequence = useRef(0)
+  const browseSequence = useRef<Record<BrowseMode, number>>({ trending: 0, new: 0, discover: 0 })
 
   const load = useCallback(async () => {
     if (!supabase) return
@@ -162,6 +211,10 @@ export function WatchDecider({ calendarId, userId, canEdit, members }: {
   }, [catalogTagFilter, results])
   const availableGenres = CATALOG_GENRES.filter((genre) => genre.type === 'all'
     || catalogType === 'all' || genre.type === catalogType)
+  const visibleShelves = useMemo(() => shelves.map((shelf) => ({
+    ...shelf,
+    visibleItems: filterCatalogText(shelf.items, catalogTagFilter),
+  })), [shelves, catalogTagFilter])
   const resetCatalogSearch = () => {
     ++searchSequence.current
     setResults([])
@@ -203,36 +256,98 @@ export function WatchDecider({ calendarId, userId, canEdit, members }: {
     setBusy(false)
   }
 
+  const fetchCatalogPage = useCallback(async (mode: 'search' | BrowseMode, search: string, page: number, filters: CatalogFilters) => {
+    if (!supabase) throw new Error('Servizio non configurato.')
+    const { data, error: authError } = await supabase.auth.getSession()
+    if (authError) throw new Error(authError.message)
+    if (!data.session) throw new Error('Accedi per cercare nel catalogo.')
+    const params = new URLSearchParams({ mode, type: filters.type, page: String(page) })
+    if (mode === 'search') params.set('query', search.trim())
+    if (filters.year) params.set('year', filters.year)
+    if (filters.genre) params.set('genre', filters.genre)
+    const response = await fetch(`/api/catalog?${params}`, {
+      headers: { Authorization: `Bearer ${data.session.access_token}` },
+    })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : 'Ricerca non riuscita.')
+    if (!Array.isArray(payload.results)) throw new Error('Risposta del catalogo non valida.')
+    return {
+      results: payload.results as CatalogItem[],
+      page: Number(payload.page) || page,
+      totalPages: Number(payload.total_pages) || 0,
+    }
+  }, [])
+
+  const loadBrowseShelf = useCallback(async (
+    mode: BrowseMode,
+    page: number,
+    append: boolean,
+    filters: CatalogFilters,
+  ) => {
+    const request = ++browseSequence.current[mode]
+    setShelves((current) => current.map((shelf) => shelf.mode === mode ? { ...shelf, loading: true } : shelf))
+    try {
+      const result = await fetchCatalogPage(mode, '', page, filters)
+      if (request !== browseSequence.current[mode]) return
+      const filtered = filterCatalogItems(result.results, filters)
+      setShelves((current) => current.map((shelf) => {
+        if (shelf.mode !== mode) return shelf
+        const existing = append ? shelf.items : []
+        const known = new Set(existing.map((item) => `${item.category}-${item.id}`))
+        return {
+          ...shelf,
+          items: [...existing, ...filtered.filter((item) => !known.has(`${item.category}-${item.id}`))],
+          page: result.page,
+          totalPages: result.totalPages,
+          loading: false,
+        }
+      }))
+    } catch (failure) {
+      if (request === browseSequence.current[mode]) {
+        setShelves((current) => current.map((shelf) => shelf.mode === mode ? { ...shelf, loading: false } : shelf))
+        setError(`Catalogo: ${failure instanceof Error ? failure.message : 'errore inatteso.'}`)
+      }
+    }
+  }, [fetchCatalogPage])
+
+  useEffect(() => {
+    if (!sessionId || session?.status !== 'draft' || !canEdit) {
+      setShelves(emptyShelves())
+      return
+    }
+    setShelves(emptyShelves())
+    void Promise.all(BROWSE_SHELVES.map((shelf) => loadBrowseShelf(shelf.mode, 1, false, appliedCatalogFilters)))
+    return () => {
+      for (const shelf of BROWSE_SHELVES) browseSequence.current[shelf.mode] += 1
+    }
+  }, [calendarId, sessionId, session?.status, canEdit, loadBrowseShelf])
+
+  const applyCatalogFilters = () => {
+    const filters = { type: catalogType, year: catalogYear, genre: catalogGenre, tag: catalogTagFilter }
+    setAppliedCatalogFilters(filters)
+    setShelves(emptyShelves())
+    resetCatalogSearch()
+    void Promise.all(BROWSE_SHELVES.map((shelf) => loadBrowseShelf(shelf.mode, 1, false, filters)))
+  }
+
   const searchCatalog = async (search: string, page = 1) => {
     if (!supabase) return
     const trimmed = search.trim()
-    if ((trimmed.length > 0 && trimmed.length < 2) || (trimmed.length === 0
-      && catalogType === 'all' && !catalogYear && !catalogGenre)) {
-      setError('Inserisci almeno due caratteri oppure scegli tipo, anno o genere.')
+    if (trimmed.length < 2) {
+      setError('Inserisci almeno due caratteri per cercare un titolo.')
       return
     }
     const request = ++searchSequence.current
     setSearching(true); setError('')
     try {
-      const { data, error: authError } = await supabase.auth.getSession()
-      if (authError) throw new Error(authError.message)
-      if (!data.session) throw new Error('Accedi per cercare nel catalogo.')
-      const params = new URLSearchParams({ type: catalogType, page: String(page) })
-      if (trimmed) params.set('query', trimmed)
-      if (catalogYear) params.set('year', catalogYear)
-      if (catalogGenre) params.set('genre', catalogGenre)
-      const response = await fetch(`/api/catalog?${params}`, {
-        headers: { Authorization: `Bearer ${data.session.access_token}` },
+      const result = await fetchCatalogPage('search', trimmed, page, {
+        type: catalogType, year: catalogYear, genre: catalogGenre, tag: catalogTagFilter,
       })
-      const payload = await response.json()
-      if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : 'Ricerca non riuscita.')
-      if (!Array.isArray(payload.results)) throw new Error('Risposta del catalogo non valida.')
       if (request !== searchSequence.current) return
-      setResults(payload.results)
-      setCatalogPage(payload.page)
-      setCatalogPages(payload.total_pages)
+      setResults(result.results)
+      setCatalogPage(result.page)
+      setCatalogPages(result.totalPages)
       setLastQuery(trimmed)
-      setCatalogOpen(true)
     } catch (failure) {
       if (request === searchSequence.current) setError(`Ricerca: ${failure instanceof Error ? failure.message : 'errore inatteso.'}`)
     } finally {
@@ -297,7 +412,7 @@ export function WatchDecider({ calendarId, userId, canEdit, members }: {
     {error && <p className="form-message form-error feature-alert" role="alert">{error}</p>}
     <div className="watch-session-bar">
       <label className="feature-field">Sessione<select disabled={busy} value={sessionId} onChange={(event) => {
-        setSessionId(event.target.value); setError(''); setResults([]); setLastQuery(''); setSearching(false)
+        setSessionId(event.target.value); setError(''); resetCatalogSearch()
         setParticipants([]); setItems([]); setVotes([])
       }}>
         <option value="">Seleziona una sessione</option>{sessions.map((entry) => <option key={entry.id} value={entry.id}>{entry.name} · {entry.status === 'draft' ? 'preparazione' : entry.status === 'voting' ? 'in corso' : 'conclusa'}</option>)}
@@ -315,9 +430,8 @@ export function WatchDecider({ calendarId, userId, canEdit, members }: {
       </details>
       {session.status === 'draft' && canEdit && <>
         <details className="feature-card disclosure-card catalog-disclosure" open={catalogOpen} onToggle={(event) => setCatalogOpen(event.currentTarget.open)}>
-          <summary>Catalogo preview <span className="count-pill">{results.length} risultati</span></summary>
-          <form className="catalog-filters" onSubmit={(event) => { event.preventDefault(); void searchCatalog(query) }}>
-            <label className="feature-field catalog-title-filter">Titolo<input aria-label="Cerca film o serie" value={query} onChange={(event) => { setQuery(event.target.value); resetCatalogSearch() }} placeholder="Nome del film o della serie..." maxLength={100} /></label>
+          <summary>Scopri film e serie <span className="count-pill">{shelves.reduce((total, shelf) => total + shelf.items.length, 0)} titoli</span></summary>
+          <form className="catalog-filters" onSubmit={(event) => { event.preventDefault(); applyCatalogFilters() }}>
             <label className="feature-field">Categoria<select value={catalogType} onChange={(event) => {
               const next = event.target.value
               if (next !== 'all' && next !== 'film' && next !== 'serie') return
@@ -328,22 +442,37 @@ export function WatchDecider({ calendarId, userId, canEdit, members }: {
             }}><option value="all">Film e serie</option><option value="film">Film</option><option value="serie">Serie TV</option></select></label>
             <label className="feature-field">Anno<input type="number" min="1870" max="2100" step="1" value={catalogYear} onChange={(event) => { setCatalogYear(event.target.value); resetCatalogSearch() }} placeholder="Es. 2024" /></label>
             <label className="feature-field">Genere<select value={catalogGenre} onChange={(event) => { setCatalogGenre(event.target.value); resetCatalogSearch() }}><option value="">Tutti i generi</option>{availableGenres.map((genre) => <option key={genre.id} value={genre.id}>{genre.name}</option>)}</select></label>
-            <label className="feature-field">Tag o genere<input type="search" value={catalogTagFilter} onChange={(event) => setCatalogTagFilter(event.target.value)} placeholder="Filtra i risultati mostrati..." /></label>
-            <button className="primary-button catalog-submit" disabled={searching}>{searching ? 'Ricerca…' : 'Cerca nel catalogo'}</button>
+            <label className="feature-field catalog-tag-filter">Tag o genere<input type="search" value={catalogTagFilter} onChange={(event) => setCatalogTagFilter(event.target.value)} placeholder="Filtra i titoli già caricati..." /></label>
+            <button className="primary-button catalog-submit" disabled={BROWSE_SHELVES.some((shelf) => shelves.find((entry) => entry.mode === shelf.mode)?.loading)}>Applica filtri</button>
           </form>
-          {catalogPage > 0 && <p className="catalog-summary">{[
-            lastQuery ? `Titolo: “${lastQuery}”` : 'Catalogo per filtri',
-            catalogType === 'all' ? '' : catalogType === 'film' ? 'Film' : 'Serie TV',
-            catalogYear ? `Anno: ${catalogYear}` : '',
-            catalogGenre ? `Genere: ${CATALOG_GENRES.find((genre) => String(genre.id) === catalogGenre)?.name ?? ''}` : '',
-          ].filter(Boolean).join(' · ')}</p>}
-          {results.length > 0 && visibleCatalogResults.length === 0 && <p>Nessun risultato contiene questo tag o genere. Prova a modificare il filtro.</p>}
-          {catalogPage > 0 && results.length === 0 && <p>Nessun risultato per i criteri selezionati.</p>}
-          <div className="catalog-grid" aria-label="Anteprima dei risultati del catalogo">{visibleCatalogResults.map((entry) => {
+          {catalogYear || catalogGenre ? <p className="catalog-summary">Filtri attivi: {[
+            catalogType === 'all' ? 'film e serie' : catalogType === 'film' ? 'film' : 'serie TV',
+            catalogYear ? `anno ${catalogYear}` : '',
+            catalogGenre ? CATALOG_GENRES.find((genre) => String(genre.id) === catalogGenre)?.name : '',
+          ].filter(Boolean).join(' · ')}</p> : <p className="catalog-summary">Consigli, tendenze, novità e un catalogo da esplorare. Scorri ogni raccolta orizzontalmente o carica altre pagine.</p>}
+          {visibleShelves.map((shelf) => <section className="catalog-shelf" key={shelf.mode}>
+            <header className="catalog-shelf-heading"><h3>{shelf.title}</h3><span>{shelf.items.length ? `${shelf.items.length} titoli caricati` : ''}</span></header>
+            {shelf.visibleItems.length > 0 ? <div className="catalog-grid" aria-label={shelf.title}>{shelf.visibleItems.map((entry) => {
             const added = items.some((item) => item.tmdb_id === entry.id && item.category === entry.category)
-            const genres = catalogGenreNames(entry)
-            return <article className="catalog-card" key={`${entry.category}-${entry.id}`}><Cover path={entry.poster_path} title={entry.title} /><div className="catalog-card-copy"><strong>{entry.title}</strong><p>{entry.category === 'film' ? 'Film' : 'Serie TV'}{entry.release_date ? ` · ${entry.release_date.slice(0, 4)}` : ''}</p>{genres.length > 0 && <p className="catalog-card-genres">{genres.join(' · ')}</p>}<button disabled={busy || added} onClick={() => void insertItem({ title: entry.title, category: entry.category, tags: [], tmdb_id: entry.id, poster_path: entry.poster_path, release_date: entry.release_date })}>{added ? 'Aggiunto' : 'Aggiungi'}</button></div></article>
-          })}</div>
+            return <CatalogCard key={`${entry.category}-${entry.id}`} entry={entry} added={added} busy={busy} onAdd={() => void insertItem({ title: entry.title, category: entry.category, tags: [], tmdb_id: entry.id, poster_path: entry.poster_path, release_date: entry.release_date })} />
+          })}</div> : <p className="catalog-empty">{shelf.loading ? 'Caricamento…' : shelf.page > 0 ? 'Nessun titolo corrisponde ai filtri di questa raccolta.' : 'Caricamento dei titoli consigliati…'}</p>}
+            {shelf.loading && shelf.items.length > 0 && <p className="catalog-summary">Caricamento altri titoli…</p>}
+            {shelf.page < shelf.totalPages && <button className="catalog-more" disabled={shelf.loading} onClick={() => void loadBrowseShelf(shelf.mode, shelf.page + 1, true, appliedCatalogFilters)}>Carica altri</button>}
+          </section>)}
+        </details>
+        <details className="feature-card disclosure-card catalog-name-search">
+          <summary>Sai già cosa cercare? Cerca per nome</summary>
+          <form className="feature-row catalog-search" onSubmit={(event) => { event.preventDefault(); void searchCatalog(query) }}>
+            <input aria-label="Cerca film o serie" value={query} onChange={(event) => { setQuery(event.target.value); resetCatalogSearch() }} placeholder="Titolo preciso di un film o serie..." maxLength={100} required />
+            <button className="primary-button" disabled={searching}>{searching ? 'Ricerca…' : 'Cerca titolo'}</button>
+          </form>
+          {catalogPage > 0 && <p className="catalog-summary">{lastQuery ? `Risultati per “${lastQuery}”` : 'Risultati per filtri'}</p>}
+          {results.length > 0 && visibleCatalogResults.length === 0 && <p>Nessun risultato contiene questo tag o genere.</p>}
+          {catalogPage > 0 && results.length === 0 && <p>Nessun titolo trovato.</p>}
+          {visibleCatalogResults.length > 0 && <div className="catalog-grid" aria-label="Risultati ricerca titolo">{visibleCatalogResults.map((entry) => {
+            const added = items.some((item) => item.tmdb_id === entry.id && item.category === entry.category)
+            return <CatalogCard key={`${entry.category}-${entry.id}`} entry={entry} added={added} busy={busy} onAdd={() => void insertItem({ title: entry.title, category: entry.category, tags: [], tmdb_id: entry.id, poster_path: entry.poster_path, release_date: entry.release_date })} />
+          })}</div>}
           {catalogPages > 1 && <div className="feature-row catalog-pagination"><button disabled={searching || catalogPage <= 1} onClick={() => void searchCatalog(lastQuery, catalogPage - 1)}>Precedente</button><span>Pagina {catalogPage} di {catalogPages}</span><button disabled={searching || catalogPage >= catalogPages} onClick={() => void searchCatalog(lastQuery, catalogPage + 1)}>Successiva</button></div>}
         </details>
         <details className="feature-card disclosure-card">

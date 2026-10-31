@@ -78,3 +78,36 @@ test('catalogo supporta ricerca per categoria, anno e genere anche senza titolo'
   assert.match(calls[1], /primary_release_year=1999/)
   assert.match(calls[1], /with_genres=28/)
 })
+
+test('catalogo espone scaffali tendenza, novità e scoperta paginata', async () => {
+  for (const [mode, type, endpoint] of [
+    ['trending', 'film', '/trending/movie/week'],
+    ['new', 'serie', '/discover/tv'],
+    ['discover', 'film', '/discover/movie'],
+  ]) {
+    const calls = []
+    const response = await request(`?mode=${mode}&type=${type}&page=3`, {
+      headers: { authorization: 'Bearer session' },
+      fetcher: async (url) => {
+        calls.push(String(url))
+        if (calls.length === 1) return { status: 200, ok: true }
+        return { status: 200, ok: true, json: async () => ({
+          total_pages: 8,
+          results: [{ id: 21, title: 'Catalogo', poster_path: null, first_air_date: '2026-01-02', genre_ids: [10759] }],
+        }) }
+      },
+    })
+    assert.equal(response.statusCode, 200)
+    assert.equal(response.body.page, 3)
+    assert.equal(response.body.total_pages, 8)
+    assert.equal(response.body.results.length, 1)
+    const requestUrl = new URL(calls[1])
+    assert.equal(requestUrl.pathname, `/3${endpoint}`)
+    assert.equal(requestUrl.searchParams.get('page'), '3')
+    if (mode === 'new') {
+      assert.ok(requestUrl.searchParams.get('first_air_date.gte'))
+      assert.ok(requestUrl.searchParams.get('first_air_date.lte'))
+    }
+    if (mode === 'discover') assert.equal(requestUrl.searchParams.get('sort_by'), 'popularity.desc')
+  }
+})

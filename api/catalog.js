@@ -14,6 +14,7 @@ export async function catalogHandler(req, res, config, fetcher = fetch) {
   const url = new URL(req.url || '', 'http://localhost')
   const query = url.searchParams.get('query')?.trim() || ''
   const page = Number(url.searchParams.get('page') || 1)
+  const mode = url.searchParams.get('mode') || (query ? 'search' : 'discover')
   const mediaType = url.searchParams.get('type') || 'all'
   const yearValue = url.searchParams.get('year') || ''
   const genreValue = url.searchParams.get('genre') || ''
@@ -26,11 +27,12 @@ export async function catalogHandler(req, res, config, fetcher = fetch) {
   const genreValid = genre === null || (Number.isSafeInteger(genre)
     && (mediaType === 'all' ? [...validGenres.movie, ...validGenres.tv].includes(genre)
       : validGenres[mediaType === 'film' ? 'movie' : 'tv'].has(genre)))
-  if ((query.length > 0 && query.length < 2) || query.length > 100
+  if (!['search', 'trending', 'new', 'discover'].includes(mode)
+    || (mode === 'search' && (query.length < 2 || query.length > 100))
+    || (mode !== 'search' && query.length > 0)
     || !['all', 'film', 'serie'].includes(mediaType)
     || (yearValue && (!Number.isInteger(year) || year < 1870 || year > 2100))
-    || !genreValid || !Number.isInteger(page) || page < 1 || page > 500
-    || (!query && mediaType === 'all' && year === null && genre === null)) {
+    || !genreValid || !Number.isInteger(page) || page < 1 || page > 500) {
     return respond(400, { error: 'Ricerca, filtri o pagina non validi.' })
   }
   try {
@@ -56,30 +58,45 @@ export async function catalogHandler(req, res, config, fetcher = fetch) {
 
     const media = mediaType === 'film' ? ['movie'] : mediaType === 'serie' ? ['tv'] : ['movie', 'tv']
     let payloads
-    if (!query) {
-      payloads = await Promise.all(media.map((kind) =>
-        requestEndpoint(`/discover/${kind}`, {
-          sort_by: 'popularity.desc',
-          ...(year === null ? {} : kind === 'movie'
-            ? { primary_release_year: String(year) }
-            : { first_air_date_year: String(year) }),
-        }),
-      ))
-    } else if (mediaType === 'all' && year === null) {
+    if (mode === 'trending') {
+      payloads = await Promise.all(media.map((kind) => requestEndpoint(`/trending/${kind}/week`)))
+    } else if (mode === 'search' && mediaType === 'all' && year === null) {
       payloads = [await requestEndpoint('/search/multi', { query })]
-    } else {
+    } else if (mode === 'search') {
       payloads = await Promise.all(media.map((kind) => requestEndpoint(`/search/${kind}`, {
         query,
         ...(year === null ? {} : kind === 'movie'
           ? { year: String(year) }
           : { first_air_date_year: String(year) }),
       })))
+    } else {
+      const today = new Date()
+      const dateString = (value) => value.toISOString().slice(0, 10)
+      const lowerDate = year === null ? dateString(new Date(today.getTime() - 365 * 86_400_000)) : `${year}-01-01`
+      const upperDate = year === null ? dateString(new Date(today.getTime() + 180 * 86_400_000)) : `${year}-12-31`
+      payloads = await Promise.all(media.map((kind) => {
+        const isMovie = kind === 'movie'
+        const dateField = isMovie ? 'primary_release_date' : 'first_air_date'
+        const specificYear = isMovie ? 'primary_release_year' : 'first_air_date_year'
+        const extra = mode === 'new'
+          ? {
+            sort_by: `${dateField}.desc`,
+            [`${dateField}.gte`]: lowerDate,
+            [`${dateField}.lte`]: upperDate,
+            ...(year === null ? {} : { [specificYear]: String(year) }),
+          }
+          : {
+            sort_by: 'popularity.desc',
+            ...(year === null ? {} : { [specificYear]: String(year) }),
+          }
+        return requestEndpoint(`/discover/${kind}`, extra)
+      }))
     }
 
     const results = payloads.flatMap((payload, index) => payload.results
       .filter((entry) => Number.isSafeInteger(entry.id) && entry.id > 0)
       .map((entry) => {
-        const kind = mediaType === 'all' && query && year === null
+        const kind = mode === 'search' && mediaType === 'all' && year === null
           ? entry.media_type
           : media[index]
         if (kind !== 'movie' && kind !== 'tv') return null
