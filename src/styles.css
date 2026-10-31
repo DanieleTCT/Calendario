@@ -148,14 +148,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .disclosure-card > :last-child:not(summary) { margin-bottom: 18px; }
 .count-pill { padding: 3px 8px; border-radius: 99px; color: #5b52b5; background: #f0efff; font: 700 11px 'DM Sans', sans-serif; }
 .feature-alert { padding: 12px; border-radius: 9px; background: #fff0f1; font-size: 13px; }
-.catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); gap: 14px; }
-.catalog-card { min-width: 0; overflow: hidden; border: 1px solid #ececf3; border-radius: 12px; background: #fff; }
+.catalog-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); align-items: end; gap: 8px 12px; }
+.catalog-title-filter { grid-column: span 2; }
+.catalog-submit { min-height: 40px; margin-bottom: 8px; }
+.catalog-summary { color: #777487; font-size: 12px; }
+.catalog-grid { display: flex; gap: 14px; overflow-x: auto; overscroll-behavior-inline: contain; padding: 8px 18px 18px; scroll-snap-type: x mandatory; scrollbar-color: #b7b2df #f2f1f8; scrollbar-width: thin; -webkit-overflow-scrolling: touch; }
+.catalog-card { min-width: 0; flex: 0 0 clamp(145px, 18vw, 190px); overflow: hidden; border: 1px solid #ececf3; border-radius: 12px; background: #fff; scroll-snap-align: start; box-shadow: 0 4px 14px #28234908; }
 .watch-cover { display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover; background: #eeecfa; border-radius: 8px; }
 .watch-cover-empty { display: grid; place-items: center; color: #a9a2d8; font-size: 32px; }
-.catalog-card > div:last-child { padding: 10px; }
+.catalog-card-copy { display: flex; min-height: 152px; flex-direction: column; align-items: stretch; padding: 10px; }
 .catalog-card strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
 .catalog-card p { margin: 6px 0; font-size: 11px; }
-.catalog-card button { width: 100%; }
+.catalog-card .catalog-card-genres { display: -webkit-box; min-height: 30px; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: #817c95; font-size: 10px; }
+.catalog-card button { width: 100%; margin-top: auto; }
 .watch-list { display: grid; gap: 8px; }
 .watch-list-item { display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: 10px; background: #f8f8fc; }
 .watch-list-item .watch-cover { width: 45px; flex: 0 0 45px; }
@@ -184,10 +189,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
   .week-calendar, .month-calendar { min-width: 700px; }
   .feature-hero { padding: 22px; }
   .feature-page button:not(.primary-button), .feature-page .primary-button { min-height: 40px; }
+  .catalog-grid { margin-left: -18px; margin-right: -18px; }
+  .catalog-card { flex-basis: 155px; }
+  .catalog-title-filter { grid-column: 1 / -1; }
 }
 @media (max-width: 360px) {
   .today-button { display: none; }
   .feature-hero h2 { font-size: 24px; }
-  .catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .catalog-card { flex-basis: 140px; }
   .round-card .swipe-card { gap: 12px; padding: 12px; }
 }
