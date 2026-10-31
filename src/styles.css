@@ -208,3 +208,63 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
   .catalog-card { flex-basis: 140px; }
   .round-card .swipe-card { gap: 12px; padding: 12px; }
 }
+
+.avatar.account-avatar, .top-avatar.account-avatar { padding: 0; border: 0; cursor: pointer; overflow: hidden; }
+.avatar.account-avatar:has(svg) { background: none; }
+.avatar svg, .person-avatar svg, .mii-portrait { display: block; width: 100%; height: 100%; }
+.person-avatar:has(svg) { background: none; overflow: hidden; }
+.mii-modal { width: min(720px, 100%); }
+.mii-editor { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 22px; }
+.mii-preview { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.mii-preview-face { width: 200px; height: 200px; border-radius: 50%; overflow: hidden; box-shadow: 0 10px 30px #27234018; }
+.mii-random { gap: 6px; color: var(--purple); }
+.mii-panel { display: flex; min-width: 0; flex-direction: column; gap: 12px; }
+.mii-tabs { display: flex; gap: 4px; padding: 3px; border-radius: 9px; background: #f5f5f9; }
+.mii-tabs button { flex: 1; height: 30px; border: 0; border-radius: 6px; background: transparent; color: #8c8c9a; font-size: 11px; font-weight: 600; cursor: pointer; }
+.mii-tabs .mii-tab-active { background: #fff; color: var(--purple-dark); box-shadow: 0 1px 5px #24224112; }
+.mii-controls { display: flex; flex-direction: column; gap: 12px; max-height: 330px; overflow-y: auto; padding-right: 4px; }
+.mii-control { display: flex; flex-direction: column; gap: 6px; color: #59596b; font-size: 11px; font-weight: 600; }
+.mii-stepper { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mii-stepper strong { flex: 1; text-align: center; color: var(--ink); font-size: 12px; font-weight: 600; }
+.mii-stepper button { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: #fff; color: var(--purple); cursor: pointer; }
+.mii-stepper button:hover { background: #f4f3ff; }
+.mii-swatches { display: flex; flex-wrap: wrap; gap: 7px; }
+.mii-swatches button { width: 24px; height: 24px; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px #d8d8e4; cursor: pointer; }
+.mii-swatches .swatch-active { box-shadow: 0 0 0 2px var(--purple); }
+.mii-slider input { width: 100%; accent-color: var(--purple); }
+.mii-controls .checkbox-field { color: #59596b; font-size: 11px; }
+
+.profile-section { display: flex; width: 100%; max-width: 920px; min-height: 0; flex: 1; flex-direction: column; gap: 18px; box-sizing: border-box; padding: 22px 25px 30px; overflow-y: auto; }
+.profile-hero { display: flex; align-items: center; gap: 24px; padding: 24px; border: 1px solid var(--line); border-radius: 18px; background: #fff; }
+.profile-face { width: 150px; height: 150px; flex: 0 0 auto; border-radius: 50%; overflow: hidden; box-shadow: 0 12px 32px #27234018; }
+.profile-face span { display: grid; width: 100%; height: 100%; place-items: center; color: #fff; font-size: 40px; font-weight: 700; }
+.profile-hero-copy { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+.profile-hero-copy h2 { margin: 0; font-family: Manrope, sans-serif; font-size: 24px; letter-spacing: -.5px; }
+.profile-hero-copy p { margin: 0; color: #7d7d8e; font-size: 13px; line-height: 1.5; }
+.profile-hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 8px; }
+.profile-hero-actions .primary-button { display: inline-flex; align-items: center; gap: 6px; }
+.profile-card { padding: 22px 24px; border: 1px solid var(--line); border-radius: 18px; background: #fff; }
+.profile-card h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; font-family: Manrope, sans-serif; font-size: 16px; }
+.profile-card h3 small { color: #9393a1; font-size: 12px; font-weight: 500; }
+.profile-card textarea { width: 100%; padding: 10px 12px; border: 1px solid #e9e9f0; border-radius: 8px; font: inherit; font-size: 12px; resize: vertical; }
+.profile-card label small { margin-left: 6px; color: #a1a0ae; font-weight: 400; }
+.profile-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
+.profile-note { margin: 14px 0 0; color: #9292a1; font-size: 11px; line-height: 1.5; }
+.profile-footer { display: flex; justify-content: flex-end; margin-top: 14px; }
+.people-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+.person-card { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 16px 12px 14px; border: 1px solid var(--line); border-radius: 16px; background: #fbfbfe; text-align: center; }
+.person-card-face { width: 88px; height: 88px; overflow: hidden; border-radius: 50%; }
+.person-card-face span { display: grid; width: 100%; height: 100%; place-items: center; color: #fff; font-size: 26px; font-weight: 700; }
+.person-card strong { display: flex; align-items: center; gap: 6px; color: var(--ink); font-size: 13px; }
+.person-card p { margin: 0; color: #7d7d8e; font-size: 11px; line-height: 1.4; }
+.person-card ul { display: flex; width: 100%; flex-direction: column; gap: 4px; margin: 6px 0 0; padding: 0; list-style: none; }
+.person-card li { display: flex; align-items: center; justify-content: center; gap: 6px; color: #6d6d7e; font-size: 10px; }
+.person-card li .color-dot { flex: 0 0 auto; }
+
+@media (max-width: 720px) {
+  .mii-editor { grid-template-columns: 1fr; }
+  .mii-preview-face { width: 150px; height: 150px; }
+  .profile-hero { flex-direction: column; text-align: center; }
+  .profile-hero-actions { justify-content: center; }
+  .profile-fields { grid-template-columns: 1fr; }
+}

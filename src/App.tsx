@@ -39,6 +39,8 @@ import {
 import { supabase } from './lib/supabase'
 import { SharedMedia } from './SharedMedia'
 import { WatchDecider } from './WatchDecider'
+import { ProfileSection } from './ProfileSection'
+import { MiiPortrait, normalizeMii } from './mii'
 import {
   MEMBER_COLORS,
   type CalendarItem,
@@ -47,19 +49,13 @@ import {
   type CalendarView,
   type FamilyCalendar,
   type MemberColor,
+  type MiiConfig,
+  type UserProfile,
 } from './types'
 
 type ItemFilter = 'all' | CalendarItemType
 
 const HOURS = Array.from({ length: 24 }, (_, index) => index)
-const MEMBER_COLOR_LABELS: Record<MemberColor, string> = {
-  violet: 'Viola',
-  blue: 'Blu',
-  coral: 'Corallo',
-  green: 'Verde',
-  amber: 'Ambra',
-  pink: 'Rosa',
-}
 const itemLabels: Record<CalendarItemType, string> = {
   event: 'Evento',
   task: 'Task',
@@ -124,14 +120,16 @@ function App() {
   const [editorItem, setEditorItem] = useState<CalendarItem | null | undefined>(undefined)
   const [draftItem, setDraftItem] = useState<CalendarItem | null>(null)
   const [createDay, setCreateDay] = useState<Date | null>(null)
-  const [profileEditorOpen, setProfileEditorOpen] = useState(false)
+  const [allMembers, setAllMembers] = useState<CalendarMember[]>([])
+  const [profiles, setProfiles] = useState<Record<string, UserProfile>>({})
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [section, setSection] = useState<'calendar' | 'media' | 'watch'>('calendar')
+  const [section, setSection] = useState<'calendar' | 'media' | 'watch' | 'profile'>('calendar')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
 
   const user = session?.user ?? null
   const currentMember = members.find((member) => member.user_id === user?.id)
+  const myMii = user ? profiles[user.id]?.avatar ?? null : null
   const canEdit = currentMember?.role === 'owner' || currentMember?.can_edit === true
   const selectedItems = useMemo(
     () => items.filter((item) =>
@@ -184,6 +182,8 @@ function App() {
         setCalendars([])
         setCalendar(null)
         setMembers([])
+        setAllMembers([])
+        setProfiles({})
         setInviteCode(null)
         setEditInviteCode(null)
         setItems([])
@@ -199,12 +199,25 @@ function App() {
       const calendarRow = calendarRows?.find((row) => row.id === selectedCalendarId) ?? calendarRows?.[0]
       if (!calendarRow) throw new Error('Nessun calendario accessibile per gli spazi associati.')
 
-      const { data: calendarMembers, error: membersError } = await supabase
+      const { data: membershipRows, error: membersError } = await supabase
         .from('calendar_members')
         .select('calendar_id, user_id, display_name, color, role, can_edit')
-        .eq('calendar_id', calendarRow.id)
+        .in('calendar_id', (calendarRows ?? []).map((row) => row.id))
         .order('created_at')
       if (membersError) throw membersError
+      const allCalendarMembers = (membershipRows ?? []) as CalendarMember[]
+      const calendarMembers = allCalendarMembers.filter((member) => member.calendar_id === calendarRow.id)
+
+      const profileUserIds = [...new Set(allCalendarMembers.map((member) => member.user_id))]
+      const profileResult = profileUserIds.length
+        ? await supabase.from('user_profiles').select('user_id, bio, avatar').in('user_id', profileUserIds)
+        : null
+      if (profileResult?.error) throw profileResult.error
+      const loadedProfiles = Object.fromEntries((profileResult?.data ?? []).map((row) => [row.user_id, {
+        user_id: row.user_id as string,
+        bio: (row.bio as string) ?? '',
+        avatar: normalizeMii(row.avatar),
+      }]))
 
       const { data: calendarItems, error: itemsError } = await supabase
         .from('calendar_items')
@@ -228,7 +241,9 @@ function App() {
       if (sequence !== loadSequence.current) return
       setCalendars(calendarRows ?? [])
       setCalendar(calendarRow)
-      setMembers(calendarMembers ?? [])
+      setMembers(calendarMembers)
+      setAllMembers(allCalendarMembers)
+      setProfiles(loadedProfiles)
       setInviteCode(code)
       setEditInviteCode(editCode)
       setItems(calendarItems ?? [])
@@ -471,17 +486,26 @@ function App() {
     }
   }
 
-  const saveMemberProfile = async (displayName: string, color: MemberColor) => {
+  const saveProfile = async (input: { displayName: string; color: MemberColor; bio: string; avatar: MiiConfig | null }) => {
     if (!supabase || !calendar || !user) return false
     setError('')
     try {
       const { error: updateError } = await supabase
         .from('calendar_members')
-        .update({ display_name: displayName.trim(), color })
+        .update({ display_name: input.displayName.trim(), color: input.color })
         .eq('calendar_id', calendar.id)
         .eq('user_id', user.id)
       if (updateError) {
         setError(`Impossibile aggiornare il profilo: ${updateError.message}`)
+        return false
+      }
+
+      const { error: profileError } = await supabase
+        .from('user_profiles')
+        .upsert({ user_id: user.id, bio: input.bio, avatar: input.avatar, updated_at: new Date().toISOString() }, { onConflict: 'user_id' })
+      if (profileError) {
+        setError(`Impossibile salvare Mii e descrizione: ${profileError.message}`)
+        await loadCalendar(user)
         return false
       }
 
@@ -610,6 +634,7 @@ function App() {
             ['calendar', 'Calendario'],
             ['media', 'File e riproduzione'],
             ['watch', 'Watch-decider'],
+            ['profile', 'Profilo'],
           ] as const).map(([value, label]) => <button key={value} className={`filter-row ${section === value ? 'filter-selected' : ''}`} onClick={() => { setSection(value); setSidebarOpen(false) }}>{label}</button>)}
         </nav>
         {section === 'calendar' && <button className="create-button" onClick={() => openNewItem(date)} disabled={!canEdit}>
@@ -631,7 +656,6 @@ function App() {
               setSelectedCalendarId(entry.id)
               setMemberFilter(null)
               setEditorItem(undefined)
-              setProfileEditorOpen(false)
             }}>
               <span className="color-dot dot-family" />
               <span>{entry.name}</span>
@@ -664,10 +688,10 @@ function App() {
           <div className="people-section-head">
             <button
               className="icon-button profile-edit-button"
-              onClick={() => setProfileEditorOpen(true)}
+              onClick={() => setSection('profile')}
               disabled={!currentMember}
-              title="Personalizza il tuo profilo"
-              aria-label="Personalizza il tuo profilo"
+              title="Apri il tuo profilo"
+              aria-label="Apri il tuo profilo"
             ><Settings2 size={15} /></button>
           </div>
           <button
@@ -684,7 +708,7 @@ function App() {
               onClick={() => setMemberFilter(member.user_id)}
               title={`Mostra gli elementi assegnati a ${memberDisplayName(member)}`}
             >
-              <MemberAvatar member={member} small />
+              <MemberAvatar member={member} mii={profiles[member.user_id]?.avatar} small />
               <span className="member-row-name">{memberDisplayName(member)}</span>
               {member.user_id === user.id && <span className="member-you">Tu</span>}
             </button>
@@ -721,7 +745,9 @@ function App() {
 
         <div className="sidebar-bottom">
           <div className="account-row">
-            <div className="avatar">{(user.email?.[0] ?? 'F').toLocaleUpperCase('it-IT')}</div>
+            <button className="avatar account-avatar" onClick={() => setSection('profile')} aria-label="Apri il tuo profilo" title="Apri il tuo profilo">
+              {myMii ? <MiiPortrait config={myMii} label="Il tuo Mii" /> : (user.email?.[0] ?? 'F').toLocaleUpperCase('it-IT')}
+            </button>
             <div className="account-copy"><strong>{user.email}</strong><span>Calendario condiviso</span></div>
             <button className="icon-button signout-button" onClick={() => { if (supabase) void supabase.auth.signOut() }} title="Esci"><LogOut size={17} /></button>
           </div>
@@ -739,7 +765,7 @@ function App() {
               <button className="icon-button" onClick={() => navigate(1)} aria-label="Periodo successivo"><ArrowRight size={18} /></button>
             </div>
             <h1 className="date-heading">{formatMonthHeading(date)}</h1></>}
-            {section !== 'calendar' && <h1 className="date-heading">{calendar.name}</h1>}
+            {section !== 'calendar' && <h1 className="date-heading">{section === 'profile' ? 'Profilo' : calendar.name}</h1>}
           </div>
           <div className="topbar-actions">
             {dataLoading && <LoaderCircle className="loading-icon" size={18} />}
@@ -748,7 +774,9 @@ function App() {
               <button className={view === 'month' ? 'view-active' : ''} onClick={() => setView('month')}>Mese</button>
             </div>
             <button className="icon-button help-button" title="Aiuto" onClick={() => setNotice('Nella vista settimana fai doppio clic su uno spazio vuoto per creare una bozza; trascina l’evento per spostarlo e i bordi per regolarne la durata.')}><CircleHelp size={19} /></button></>}
-            <div className="avatar top-avatar">{(user.email?.[0] ?? 'F').toLocaleUpperCase('it-IT')}</div>
+            <button className="avatar top-avatar account-avatar" onClick={() => setSection('profile')} aria-label="Apri il tuo profilo" title="Apri il tuo profilo">
+              {myMii ? <MiiPortrait config={myMii} label="Il tuo Mii" /> : (user.email?.[0] ?? 'F').toLocaleUpperCase('it-IT')}
+            </button>
           </div>
         </header>
 
@@ -785,6 +813,17 @@ function App() {
         </section>}
         {section === 'media' && <SharedMedia key={calendar.id} calendarId={calendar.id} canEdit={canEdit} />}
         {section === 'watch' && <WatchDecider key={calendar.id} calendarId={calendar.id} userId={user.id} canEdit={canEdit} members={members} />}
+        {section === 'profile' && <ProfileSection
+          key={calendar.id}
+          calendar={calendar}
+          calendars={calendars}
+          currentMember={currentMember}
+          memberships={allMembers}
+          profiles={profiles}
+          userId={user.id}
+          saving={dataLoading}
+          onSave={saveProfile}
+        />}
       </main>
 
       {editorItem !== undefined && (
@@ -807,13 +846,6 @@ function App() {
               } else void deleteItem(editorItem.id)
             }
             : undefined}
-        />
-      )}
-      {profileEditorOpen && currentMember && (
-        <MemberProfileEditor
-          member={currentMember}
-          onClose={() => setProfileEditorOpen(false)}
-          onSave={saveMemberProfile}
         />
       )}
     </div>
@@ -1258,15 +1290,15 @@ function CalendarItemChip({
   )
 }
 
-function MemberAvatar({ member, small = false }: { member: CalendarMember; small?: boolean }) {
+function MemberAvatar({ member, mii, small = false }: { member: CalendarMember; mii?: MiiConfig | null; small?: boolean }) {
   const name = memberDisplayName(member)
   return (
     <span
       className={`person-avatar ${small ? 'person-avatar-small' : ''}`}
-      style={{ backgroundColor: MEMBER_COLORS[member.color] ?? MEMBER_COLORS.violet }}
+      style={mii ? undefined : { backgroundColor: MEMBER_COLORS[member.color] ?? MEMBER_COLORS.violet }}
       aria-label={name}
     >
-      {memberInitials(name)}
+      {mii ? <MiiPortrait config={mii} label={name} /> : memberInitials(name)}
     </span>
   )
 }
@@ -1346,39 +1378,6 @@ function ItemEditor({
           <div className="modal-footer">{onDelete && canEdit ? <button type="button" className="delete-button" onClick={onDelete}><Trash2 size={16} /> Elimina</button> : <span />}
             <div><button type="button" className="cancel-button" onClick={onClose}>{canEdit ? 'Annulla' : 'Chiudi'}</button>{canEdit && <button className="primary-button save-button" type="submit" disabled={saving}>{saving ? <LoaderCircle className="loading-icon" size={17} /> : item && !isDraft ? 'Salva modifiche' : 'Crea evento'}</button>}</div>
           </div>
-        </form>
-      </section>
-    </div>
-  )
-}
-
-function MemberProfileEditor({ member, onClose, onSave }: {
-  member: CalendarMember
-  onClose: () => void
-  onSave: (displayName: string, color: MemberColor) => Promise<boolean>
-}) {
-  const [name, setName] = useState(member.display_name)
-  const [color, setColor] = useState<MemberColor>(member.color)
-  const [saving, setSaving] = useState(false)
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault()
-    if (!name.trim()) return
-    setSaving(true)
-    const saved = await onSave(name, color)
-    setSaving(false)
-    if (saved) onClose()
-  }
-
-  return (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <section className="item-modal" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title">
-        <div className="modal-top"><span className="eyebrow">PROFILO</span><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={19} /></button></div>
-        <h2 id="profile-modal-title">Personalizza il tuo profilo</h2>
-        <form onSubmit={(event) => void submit(event)} className="auth-form">
-          <label>Nome<input value={name} onChange={(event) => setName(event.target.value)} maxLength={40} required /></label>
-          <label>Colore<select value={color} onChange={(event) => setColor(event.target.value as MemberColor)}>{(Object.keys(MEMBER_COLOR_LABELS) as MemberColor[]).map((value) => <option key={value} value={value}>{MEMBER_COLOR_LABELS[value]}</option>)}</select></label>
-          <div className="modal-footer"><span /><div><button type="button" className="cancel-button" onClick={onClose}>Annulla</button><button type="submit" className="primary-button save-button" disabled={saving}>Salva</button></div></div>
         </form>
       </section>
     </div>

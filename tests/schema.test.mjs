@@ -143,3 +143,76 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     await db.close()
   }
 })
+
+test('profili Mii leggibili solo ai membri dei calendari condivisi e modificabili solo dal proprietario', async () => {
+  const db = new PGlite({ extensions: { pgcrypto } })
+  try {
+    await db.exec(`
+      create role anon;
+      create role authenticated;
+      create schema auth;
+      create table auth.users (id uuid primary key, email text);
+      create function auth.uid() returns uuid language sql stable as $$
+        select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+      $$;
+      grant usage on schema auth to authenticated;
+      grant execute on function auth.uid() to authenticated;
+      create schema storage;
+      create table storage.buckets (id text primary key, name text, public boolean, file_size_limit bigint);
+      create table storage.objects (id uuid default gen_random_uuid(), bucket_id text, name text);
+      alter table storage.objects enable row level security;
+      grant usage on schema storage to authenticated;
+      grant select, insert, delete on storage.objects to authenticated;
+      create publication supabase_realtime;
+    `)
+    await db.exec(await readFile(new URL('../supabase/schema.sql', import.meta.url), 'utf8'))
+    for (const [id, email] of [[owner, 'owner@example.test'], [viewer, 'viewer@example.test'], [outsider, 'other@example.test']]) {
+      await db.query('insert into auth.users (id, email) values ($1, $2)', [id, email])
+    }
+
+    async function as(id) {
+      await db.exec('reset role')
+      await db.query("select set_config('request.jwt.claim.sub', $1, false)", [id])
+      await db.exec('set role authenticated')
+    }
+    async function rows(sql, params = []) {
+      return (await db.query(sql, params)).rows
+    }
+
+    await as(owner)
+    await db.query('insert into public.calendars (id, name, created_by) values ($1, $2, $3)', [calendar, 'Famiglia', owner])
+    const code = (await rows('select public.get_calendar_invite_code($1) as code', [calendar]))[0].code
+    await as(viewer)
+    await db.query('select public.join_calendar_with_code($1)', [code])
+
+    await as(owner)
+    await db.query(
+      `insert into public.user_profiles (user_id, bio, avatar) values ($1, 'Ciao', '{"faceShape": 2}'::jsonb)`,
+      [owner],
+    )
+    await assert.rejects(() => db.query(
+      `insert into public.user_profiles (user_id, bio) values ($1, 'falso')`,
+      [viewer],
+    ))
+
+    await as(viewer)
+    await assert.rejects(() => db.query(
+      `insert into public.user_profiles (user_id, avatar) values ($1, '[1,2]'::jsonb)`,
+      [viewer],
+    ))
+
+    assert.equal((await rows('select bio from public.user_profiles where user_id = $1', [owner]))[0].bio, 'Ciao')
+    await db.query('insert into public.user_profiles (user_id, bio) values ($1, $2)', [viewer, 'Mamma'])
+    await db.query(`update public.user_profiles set bio = 'Mamma felice' where user_id = $1`, [viewer])
+    assert.equal((await rows(`update public.user_profiles set bio = 'hack' where user_id = $1 returning user_id`, [owner])).length, 0)
+    assert.equal((await rows('select bio from public.user_profiles where user_id = $1', [owner]))[0].bio, 'Ciao')
+
+    await as(outsider)
+    assert.equal((await rows('select user_id from public.user_profiles')).length, 0)
+    await as(owner)
+    assert.equal((await rows('select user_id from public.user_profiles where user_id = $1', [viewer])).length, 1)
+  } finally {
+    await db.close()
+  }
+})
+

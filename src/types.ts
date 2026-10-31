@@ -40,3 +40,31 @@ export interface FamilyCalendar {
   id: string
   name: string
 }
+
+export interface MiiConfig {
+  background: number
+  faceShape: number
+  skin: number
+  hairStyle: number
+  hairColor: number
+  eyeStyle: number
+  eyeColor: number
+  eyeSpacing: number
+  eyeSize: number
+  eyeTilt: number
+  eyebrowStyle: number
+  noseStyle: number
+  mouthStyle: number
+  lipColor: number
+  beard: number
+  glasses: number
+  blush: boolean
+  mole: boolean
+  shirt: number
+}
+
+export interface UserProfile {
+  user_id: string
+  bio: string
+  avatar: MiiConfig | null
+}

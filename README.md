@@ -16,6 +16,7 @@ Applicazione web React + Vite con calendari, file condivisi, riproduzione sincro
 
 - Crea un account, poi crea un calendario o unisciti inserendo il codice ricevuto.
 - Nella barra laterale puoi passare tra i tuoi calendari oppure crearne o aggiungerne altri.
+- Nella voce **Profilo** imposti nome e colore per il calendario selezionato, una breve descrizione e il tuo Mii: un volto personalizzabile con forma, pelle, capelli, occhi, sopracciglia, naso, bocca, barba, occhiali, guance, maglia e sfondo. Il Mii sostituisce le iniziali nella barra superiore, nella barra laterale e nell'elenco delle persone. La stessa sezione mostra tutte le persone presenti nei tuoi calendari, con i calendari in cui partecipano e il loro ruolo.
 - L'amministratore del calendario può condividere un codice per la sola lettura oppure uno per la modifica. Può cambiare i permessi di un membro, rimuoverlo o revocare entrambi i codici senza rimuovere i membri esistenti. Rimuovere un membro rigenera entrambi i codici.
 - Per ogni elemento scegli se renderlo visibile a tutti i membri o solo a persone specifiche. Il creatore lo vede sempre.
 - Crea e modifica eventi, task e lezioni; le modifiche sono salvate su Supabase e sincronizzate via Realtime.
