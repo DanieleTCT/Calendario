@@ -20,6 +20,7 @@ Applicazione web React + Vite con calendari, file condivisi, riproduzione sincro
 - Per ogni elemento scegli se renderlo visibile a tutti i membri o solo a persone specifiche. Il creatore lo vede sempre.
 - Crea e modifica eventi, task e lezioni; le modifiche sono salvate su Supabase e sincronizzate via Realtime.
 - Passa tra vista settimana e mese. Le task possono essere completate con la casella accanto al titolo.
+- La griglia settimanale copre tutta la giornata, da `00:00` a `24:00`. Fai doppio clic su uno spazio vuoto per creare una bozza da un'ora: trascinala per spostarla, trascina i bordi per regolare in intervalli di 15 minuti oppure fai clic sui bordi per estendere l'inizio o la fine. Seleziona la bozza per inserire titolo e descrizione e salvarla.
 - In **File e riproduzione**, gli editor possono caricare ed eliminare file fino a 50 MB ciascuno, selezionare un file audio o video, riprodurlo, metterlo in pausa e spostare la posizione per tutti. Ogni partecipante deve aprire la sezione e attivare la riproduzione sul proprio dispositivo.
 - In **Watch-decider**, un editor crea una sessione, cerca film e serie su TMDb e li aggiunge alla lista con la copertina. Può anche aggiungere manualmente film, serie, giochi e altri titoli con tag.
 - Almeno due membri partecipano prima che un editor avvii la partita. I partecipanti votano gli stessi titoli in ordine casuale e al proprio ritmo: swipe a sinistra per passare, swipe a destra per 4 stelle, oppure un voto da 1 a 5. La lista e i partecipanti sono bloccati dopo l'avvio.

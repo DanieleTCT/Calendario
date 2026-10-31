@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, MouseEvent, PointerEvent } from 'react'
 import type { AuthChangeEvent, Session, User } from '@supabase/supabase-js'
 import {
   addDays,
@@ -51,7 +51,7 @@ import {
 
 type ItemFilter = 'all' | CalendarItemType
 
-const HOURS = Array.from({ length: 16 }, (_, index) => index + 7)
+const HOURS = Array.from({ length: 24 }, (_, index) => index)
 const MEMBER_COLOR_LABELS: Record<MemberColor, string> = {
   violet: 'Viola',
   blue: 'Blu',
@@ -122,6 +122,7 @@ function App() {
   const [filter, setFilter] = useState<ItemFilter>('all')
   const [memberFilter, setMemberFilter] = useState<string | null>(null)
   const [editorItem, setEditorItem] = useState<CalendarItem | null | undefined>(undefined)
+  const [draftItem, setDraftItem] = useState<CalendarItem | null>(null)
   const [createDay, setCreateDay] = useState<Date | null>(null)
   const [profileEditorOpen, setProfileEditorOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -317,7 +318,63 @@ function App() {
       return
     }
     setCreateDay(day)
+    setDraftItem(null)
     setEditorItem(null)
+  }
+
+  const createTimedDraft = (day: Date, minuteOfDay: number) => {
+    if (!canEdit || !user || !calendar) {
+      setNotice('Hai accesso in sola lettura a questo calendario.')
+      return
+    }
+    const startsAt = new Date(day)
+    startsAt.setHours(Math.floor(minuteOfDay / 60), minuteOfDay % 60, 0, 0)
+    const endsAt = new Date(startsAt)
+    endsAt.setMinutes(endsAt.getMinutes() + 60)
+    const draft: CalendarItem = {
+      id: `draft:${crypto.randomUUID()}`,
+      calendar_id: calendar.id,
+      title: 'Nuovo evento',
+      description: '',
+      item_type: 'event',
+      starts_at: startsAt.toISOString(),
+      ends_at: endsAt.toISOString(),
+      all_day: false,
+      completed: false,
+      assignee_id: user.id,
+      created_by: user.id,
+      visibility: 'everyone',
+      visible_to: [],
+    }
+    setCreateDay(startsAt)
+    setDraftItem(draft)
+    setEditorItem(undefined)
+    setNotice('Bozza creata. Trascinala per spostarla o regola le estremità; selezionala per aggiungere titolo e descrizione.')
+  }
+
+  const updateTimedItem = async (item: CalendarItem, startsAt: Date, endsAt: Date) => {
+    if (!supabase || !user || !canEdit) return
+    const isDraft = item.id.startsWith('draft:')
+    if (isDraft) {
+      setDraftItem({ ...item, starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString() })
+      return
+    }
+    setError('')
+    const { data: updated, error: updateError } = await supabase
+      .from('calendar_items')
+      .update({ starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString() })
+      .eq('id', item.id)
+      .select('id')
+      .maybeSingle()
+    if (updateError) {
+      setError(`Impossibile spostare l'evento: ${updateError.message}`)
+      return
+    }
+    if (!updated) {
+      setError('Evento non aggiornato: potrebbe non essere più disponibile o modificabile.')
+      return
+    }
+    await loadCalendar(user)
   }
 
   const saveItem = async (form: {
@@ -346,7 +403,8 @@ function App() {
       visible_to: form.visibility === 'selected' ? form.visible_to : [],
     }
     try {
-      const result = editorItem
+      const isDraft = editorItem?.id.startsWith('draft:') ?? false
+      const result = editorItem && !isDraft
         ? await supabase.from('calendar_items').update(payload).eq('id', editorItem.id).select('id').maybeSingle()
         : await supabase.from('calendar_items').insert({ ...payload, created_by: user.id })
       if (result.error) {
@@ -358,6 +416,7 @@ function App() {
         return false
       }
       setEditorItem(undefined)
+      if (isDraft) setDraftItem(null)
       await loadCalendar(user)
       return true
     } catch (saveError) {
@@ -688,7 +747,7 @@ function App() {
               <button className={view === 'week' ? 'view-active' : ''} onClick={() => setView('week')}>Settimana</button>
               <button className={view === 'month' ? 'view-active' : ''} onClick={() => setView('month')}>Mese</button>
             </div>
-            <button className="icon-button help-button" title="Aiuto" onClick={() => setNotice('Clicca su un giorno o su Crea per aggiungere eventi, task e lezioni.')}><CircleHelp size={19} /></button></>}
+            <button className="icon-button help-button" title="Aiuto" onClick={() => setNotice('Nella vista settimana fai doppio clic su uno spazio vuoto per creare una bozza; trascina l’evento per spostarlo e i bordi per regolarne la durata.')}><CircleHelp size={19} /></button></>}
             <div className="avatar top-avatar">{(user.email?.[0] ?? 'F').toLocaleUpperCase('it-IT')}</div>
           </div>
         </header>
@@ -704,11 +763,13 @@ function App() {
           {view === 'week' ? (
             <WeekCalendar
               days={weekDays}
-              items={selectedItems}
+              items={draftItem ? [...selectedItems, draftItem] : selectedItems}
               members={members}
               onCreate={openNewItem}
+              onCreateTimedDraft={createTimedDraft}
               onEdit={(item) => setEditorItem(item)}
               onToggleTask={toggleTask}
+              onUpdateTime={updateTimedItem}
             />
           ) : (
             <MonthCalendar
@@ -733,9 +794,19 @@ function App() {
           members={members}
           currentUserId={user.id}
           canEdit={canEdit}
-          onClose={() => setEditorItem(undefined)}
+          onClose={() => {
+            if (editorItem?.id.startsWith('draft:')) setDraftItem(null)
+            setEditorItem(undefined)
+          }}
           onSave={saveItem}
-          onDelete={editorItem ? () => void deleteItem(editorItem.id) : undefined}
+          onDelete={editorItem
+            ? () => {
+              if (editorItem.id.startsWith('draft:')) {
+                setDraftItem(null)
+                setEditorItem(undefined)
+              } else void deleteItem(editorItem.id)
+            }
+            : undefined}
         />
       )}
       {profileEditorOpen && currentMember && (
@@ -887,15 +958,19 @@ function WeekCalendar({
   items,
   members,
   onCreate,
+  onCreateTimedDraft,
   onEdit,
   onToggleTask,
+  onUpdateTime,
 }: {
   days: Date[]
   items: CalendarItem[]
   members: CalendarMember[]
   onCreate: (day: Date) => void
+  onCreateTimedDraft: (day: Date, minuteOfDay: number) => void
   onEdit: (item: CalendarItem) => void
   onToggleTask: (item: CalendarItem) => void
+  onUpdateTime: (item: CalendarItem, startsAt: Date, endsAt: Date) => Promise<void>
 }) {
   const timedItems = items.filter((item) => !item.all_day && item.item_type !== 'task')
   const allDayItems = items.filter((item) => item.all_day || item.item_type === 'task')
@@ -913,34 +988,209 @@ function WeekCalendar({
         </div>)}
       </div>
       <div className="week-scroll">
-        <div className="time-column">{HOURS.map((hour) => <div className="time-label" key={hour}>{format(new Date(2020, 0, 1, hour), 'HH:mm')}</div>)}</div>
+        <div className="time-column">
+          {HOURS.map((hour) => <div className="time-label" key={hour}>{format(new Date(2020, 0, 1, hour), 'HH:mm')}</div>)}
+          <div className="time-label time-label-end">24:00</div>
+        </div>
         <div className="week-grid">
-          {days.map((day) => (
-            <div className={`day-column ${isToday(day) ? 'day-column-today' : ''}`} key={day.toISOString()} onDoubleClick={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect()
-              const offset = Math.max(0, event.clientY - rect.top)
-              const hour = Math.min(22, 7 + Math.floor(offset / 64))
-              const newDate = new Date(day)
-              newDate.setHours(hour, 0, 0, 0)
-              onCreate(newDate)
-            }}>
+          {days.map((day) => {
+            const dayStart = new Date(day)
+            dayStart.setHours(0, 0, 0, 0)
+            const dayEnd = new Date(dayStart)
+            dayEnd.setDate(dayEnd.getDate() + 1)
+            const dayItems = timedItems.filter((item) => {
+              const startsAt = parseISO(item.starts_at)
+              const endsAt = parseISO(item.ends_at)
+              return startsAt < dayEnd && endsAt > dayStart
+            })
+
+            return <div
+              className={`day-column ${isToday(day) ? 'day-column-today' : ''}`}
+              key={day.toISOString()}
+              onDoubleClick={(event) => {
+                if (event.target instanceof Element && event.target.closest('.week-event')) return
+                const rect = event.currentTarget.getBoundingClientRect()
+                const offset = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+                const minuteOfDay = Math.min(23 * 60 + 45, Math.floor(offset / 64 * 4) * 15)
+                onCreateTimedDraft(day, minuteOfDay)
+              }}
+            >
               {HOURS.map((hour) => <div className="hour-cell" key={hour} />)}
-              {timedItems.filter((item) => isSameDay(parseISO(item.starts_at), day)).map((item) => {
-                const start = parseISO(item.starts_at)
-                const end = parseISO(item.ends_at)
+              {dayItems.map((item) => {
+                const startsAt = parseISO(item.starts_at)
+                const endsAt = parseISO(item.ends_at)
+                const startsToday = isSameDay(startsAt, day)
+                const segmentStartMinute = startsToday ? startsAt.getHours() * 60 + startsAt.getMinutes() : 0
+                const segmentEndMinute = endsAt >= dayEnd ? 1440 : endsAt.getHours() * 60 + endsAt.getMinutes()
+                const startTime = startsToday ? startsAt : dayStart
+                const endTime = endsAt >= dayEnd ? dayEnd : endsAt
+                const height = Math.max(15, segmentEndMinute - segmentStartMinute) / 60 * 64
                 const assignee = members.find((member) => member.user_id === item.assignee_id)
-                const top = (start.getHours() - 7 + start.getMinutes() / 60) * 64
-                const height = Math.max(30, Math.min(16, (end.getTime() - start.getTime()) / 3_600_000) * 64)
-                return <button key={item.id} className={`week-event event-${item.item_type}`} style={{ top: `${top}px`, height: `${height}px`, borderLeftColor: assignee ? MEMBER_COLORS[assignee.color] : undefined }} title={assignee ? `${item.title} · ${memberDisplayName(assignee)}` : item.title} onClick={(event) => { event.stopPropagation(); onEdit(item) }}>
-                  <strong>{item.title}</strong><span>{format(start, 'HH:mm')} – {format(end, 'HH:mm')}{assignee ? ` · ${memberDisplayName(assignee)}` : ''}</span>
-                </button>
+                return <TimedCalendarEvent
+                  key={item.id}
+                  item={item}
+                  day={day}
+                  top={segmentStartMinute / 60 * 64}
+                  height={height}
+                  startLabel={format(startTime, 'HH:mm')}
+                  endLabel={endsAt >= dayEnd ? '24:00' : format(endTime, 'HH:mm')}
+                  borderColor={assignee ? MEMBER_COLORS[assignee.color] : undefined}
+                  canMove={startsToday}
+                  onEdit={onEdit}
+                  onUpdateTime={onUpdateTime}
+                />
               })}
             </div>
-          ))}
+          })}
         </div>
       </div>
     </div>
   )
+}
+
+function dateAtDayMinute(day: Date, minuteOfDay: number) {
+  const result = new Date(day)
+  result.setHours(0, 0, 0, 0)
+  result.setMinutes(minuteOfDay)
+  return result
+}
+
+function wallMinutesFromDay(day: Date, value: Date) {
+  const dateDelta = Math.round((new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime()
+    - new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime()) / 86_400_000)
+  return dateDelta * 1440 + value.getHours() * 60 + value.getMinutes()
+}
+
+function TimedCalendarEvent({
+  item,
+  day,
+  top,
+  height,
+  startLabel,
+  endLabel,
+  borderColor,
+  canMove,
+  onEdit,
+  onUpdateTime,
+}: {
+  item: CalendarItem
+  day: Date
+  top: number
+  height: number
+  startLabel: string
+  endLabel: string
+  borderColor?: string
+  canMove: boolean
+  onEdit: (item: CalendarItem) => void
+  onUpdateTime: (item: CalendarItem, startsAt: Date, endsAt: Date) => Promise<void>
+}) {
+  const [preview, setPreview] = useState<{ startsAt: Date; endsAt: Date } | null>(null)
+  const gesture = useRef<{
+    pointerId: number
+    mode: 'move' | 'start' | 'end'
+    clientY: number
+    startMinute: number
+    endMinute: number
+    moved: boolean
+  } | null>(null)
+  const suppressClick = useRef(false)
+  const startsAt = preview?.startsAt ?? parseISO(item.starts_at)
+  const endsAt = preview?.endsAt ?? parseISO(item.ends_at)
+
+  const beginGesture = (event: PointerEvent<HTMLElement>, mode: 'move' | 'start' | 'end') => {
+    if (!canMove || event.button !== 0) return
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    gesture.current = {
+      pointerId: event.pointerId,
+      mode,
+      clientY: event.clientY,
+      startMinute: wallMinutesFromDay(day, startsAt),
+      endMinute: wallMinutesFromDay(day, endsAt),
+      moved: false,
+    }
+  }
+
+  const moveGesture = (event: PointerEvent<HTMLDivElement>) => {
+    const active = gesture.current
+    if (!active || active.pointerId !== event.pointerId) return
+    const delta = Math.round((event.clientY - active.clientY) / 64 * 4) * 15
+    if (delta === 0) return
+    active.moved = true
+    let startMinute = active.startMinute
+    let endMinute = active.endMinute
+    if (active.mode === 'move') {
+      const duration = active.endMinute - active.startMinute
+      startMinute = Math.max(0, Math.min(1425, active.startMinute + delta))
+      endMinute = startMinute + duration
+    } else if (active.mode === 'start') {
+      startMinute = Math.max(0, Math.min(1425, active.endMinute - 15, active.startMinute + delta))
+    } else {
+      endMinute = Math.max(active.startMinute + 15, Math.min(1440, active.endMinute + delta))
+    }
+    setPreview({ startsAt: dateAtDayMinute(day, startMinute), endsAt: dateAtDayMinute(day, endMinute) })
+  }
+
+  const endGesture = (event: PointerEvent<HTMLDivElement>) => {
+    const active = gesture.current
+    if (!active || active.pointerId !== event.pointerId) return
+    gesture.current = null
+    if (!active.moved || !preview) {
+      setPreview(null)
+      return
+    }
+    suppressClick.current = true
+    const next = preview
+    setPreview(null)
+    void onUpdateTime(item, next.startsAt, next.endsAt).finally(() => setPreview(null))
+  }
+
+  const selectEvent = () => {
+    if (suppressClick.current) {
+      suppressClick.current = false
+      return
+    }
+    onEdit(item)
+  }
+  const adjustEdge = (edge: 'start' | 'end', event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation()
+    if (suppressClick.current) {
+      suppressClick.current = false
+      return
+    }
+    const startMinute = wallMinutesFromDay(day, startsAt)
+    const endMinute = wallMinutesFromDay(day, endsAt)
+    if (edge === 'start' && startMinute >= 15) {
+      void onUpdateTime(item, dateAtDayMinute(day, startMinute - 15), endsAt)
+    } else if (edge === 'end' && endMinute < 1440) {
+      void onUpdateTime(item, startsAt, dateAtDayMinute(day, endMinute + 15))
+    }
+  }
+  const timeLabel = preview
+    ? `${format(startsAt, 'HH:mm')} – ${wallMinutesFromDay(day, endsAt) >= 1440 ? '24:00' : format(endsAt, 'HH:mm')}`
+    : `${startLabel} – ${endLabel}`
+
+  return <div
+    className={`week-event event-${item.item_type} ${item.id.startsWith('draft:') ? 'week-event-draft' : ''} ${preview ? 'week-event-dragging' : ''}`}
+    style={{
+      top: `${preview ? wallMinutesFromDay(day, preview.startsAt) / 60 * 64 : top}px`,
+      height: `${preview ? (wallMinutesFromDay(day, preview.endsAt) - wallMinutesFromDay(day, preview.startsAt)) / 60 * 64 : height}px`,
+      borderLeftColor: borderColor,
+    }}
+    title={`${item.title}, ${startLabel}–${endLabel}. Trascina per spostare; trascina i bordi per cambiare la durata.`}
+    role="group"
+    aria-label={`${item.title}, ${startLabel}–${endLabel}`}
+    onPointerDown={(event) => beginGesture(event, 'move')}
+    onPointerMove={moveGesture}
+    onPointerUp={endGesture}
+    onPointerCancel={() => { gesture.current = null; setPreview(null) }}
+    onClick={selectEvent}
+  >
+    <button type="button" className="event-resize-handle event-resize-start" aria-label="Bordo superiore: anticipa di 15 minuti; trascina per ridimensionare" onPointerDown={(event) => beginGesture(event, 'start')} onClick={(event) => adjustEdge('start', event)} />
+    <button type="button" className="week-event-title" onClick={(event) => { event.stopPropagation(); selectEvent() }}>{item.title}</button>
+    <span className="week-event-time">{timeLabel}{item.id.startsWith('draft:') ? ' · bozza' : ''}</span>
+    <button type="button" className="event-resize-handle event-resize-end" aria-label="Bordo inferiore: allunga di 15 minuti; trascina per ridimensionare" onPointerDown={(event) => beginGesture(event, 'end')} onClick={(event) => adjustEdge('end', event)} />
+  </div>
 }
 
 function MonthCalendar({
@@ -1041,7 +1291,8 @@ function ItemEditor({
   onDelete?: () => void
 }) {
   const defaults = getDefaultTimes(initialDate)
-  const [title, setTitle] = useState(item?.title ?? '')
+  const isDraft = item?.id.startsWith('draft:') ?? false
+  const [title, setTitle] = useState(isDraft ? '' : item?.title ?? '')
   const [description, setDescription] = useState(item?.description ?? '')
   const [itemType, setItemType] = useState<CalendarItemType>(item?.item_type ?? 'event')
   const [startsAt, setStartsAt] = useState(item ? localDateTime(parseISO(item.starts_at)) : defaults.starts_at)
@@ -1071,8 +1322,8 @@ function ItemEditor({
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section className="item-modal" role="dialog" aria-modal="true" aria-labelledby="item-modal-title">
-        <div className="modal-top"><span className="eyebrow">{item ? 'MODIFICA ELEMENTO' : 'NUOVO ELEMENTO'}</span><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={19} /></button></div>
-        <h2 id="item-modal-title">{item ? 'Aggiorna il calendario' : 'Aggiungi al calendario'}</h2>
+        <div className="modal-top"><span className="eyebrow">{item && !isDraft ? 'MODIFICA ELEMENTO' : 'NUOVO EVENTO'}</span><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={19} /></button></div>
+        <h2 id="item-modal-title">{item && !isDraft ? 'Aggiorna il calendario' : 'Completa il nuovo evento'}</h2>
         {!canEdit && <p>Accesso in sola lettura</p>}
         <form onSubmit={(event) => void submit(event)}>
           <fieldset disabled={!canEdit} style={{ border: 0, padding: 0, margin: 0 }}>
@@ -1093,7 +1344,7 @@ function ItemEditor({
           </fieldset>
           {validationError && <p className="form-message form-error">{validationError}</p>}
           <div className="modal-footer">{onDelete && canEdit ? <button type="button" className="delete-button" onClick={onDelete}><Trash2 size={16} /> Elimina</button> : <span />}
-            <div><button type="button" className="cancel-button" onClick={onClose}>{canEdit ? 'Annulla' : 'Chiudi'}</button>{canEdit && <button className="primary-button save-button" type="submit" disabled={saving}>{saving ? <LoaderCircle className="loading-icon" size={17} /> : item ? 'Salva modifiche' : 'Crea'}</button>}</div>
+            <div><button type="button" className="cancel-button" onClick={onClose}>{canEdit ? 'Annulla' : 'Chiudi'}</button>{canEdit && <button className="primary-button save-button" type="submit" disabled={saving}>{saving ? <LoaderCircle className="loading-icon" size={17} /> : item && !isDraft ? 'Salva modifiche' : 'Crea evento'}</button>}</div>
           </div>
         </form>
       </section>
