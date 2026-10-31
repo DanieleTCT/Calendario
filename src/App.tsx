@@ -99,7 +99,9 @@ function formatMonthHeading(date: Date) {
 }
 
 function readableError(error: unknown) {
-  return error instanceof Error ? error.message : 'Si è verificato un errore imprevisto.'
+  if (error instanceof Error) return error.message
+  if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') return error.message
+  return 'Si è verificato un errore imprevisto.'
 }
 
 function App() {
@@ -112,6 +114,7 @@ function App() {
   const loadSequence = useRef(0)
   const [members, setMembers] = useState<CalendarMember[]>([])
   const [inviteCode, setInviteCode] = useState<string | null>(null)
+  const [editInviteCode, setEditInviteCode] = useState<string | null>(null)
   const [items, setItems] = useState<CalendarItem[]>([])
   const [dataLoading, setDataLoading] = useState(false)
   const [date, setDate] = useState(new Date())
@@ -181,6 +184,7 @@ function App() {
         setCalendar(null)
         setMembers([])
         setInviteCode(null)
+        setEditInviteCode(null)
         setItems([])
         return
       }
@@ -208,10 +212,16 @@ function App() {
         .order('starts_at')
       if (itemsError) throw itemsError
       let code: string | null = null
+      let editCode: string | null = null
       if (calendarMembers?.some((member) => member.user_id === currentUser.id && member.role === 'owner')) {
-        const { data: invite, error: inviteError } = await supabase.rpc('get_calendar_invite_code', { p_calendar_id: calendarRow.id })
-        if (inviteError) throw inviteError
-        code = invite
+        const [viewInvite, editInvite] = await Promise.all([
+          supabase.rpc('get_calendar_invite_code', { p_calendar_id: calendarRow.id }),
+          supabase.rpc('get_calendar_edit_invite_code', { p_calendar_id: calendarRow.id }),
+        ])
+        if (viewInvite.error) throw viewInvite.error
+        if (editInvite.error) throw editInvite.error
+        code = viewInvite.data
+        editCode = editInvite.data
       }
 
       if (sequence !== loadSequence.current) return
@@ -219,6 +229,7 @@ function App() {
       setCalendar(calendarRow)
       setMembers(calendarMembers ?? [])
       setInviteCode(code)
+      setEditInviteCode(editCode)
       setItems(calendarItems ?? [])
     } catch (loadError) {
       if (sequence === loadSequence.current) setError(`Impossibile caricare il calendario: ${readableError(loadError)}`)
@@ -235,6 +246,7 @@ function App() {
       setSelectedCalendarId(null)
       setMembers([])
       setInviteCode(null)
+      setEditInviteCode(null)
       setItems([])
       return
     }
@@ -441,6 +453,14 @@ function App() {
     if (remove) setNotice('Membro rimosso e codice invito rigenerato.')
   }
 
+  const rotateInvites = async () => {
+    if (!supabase || !calendar || !user || !window.confirm('Revocare entrambi i codici? I membri attuali manterranno il loro accesso.')) return
+    const { error: rotateError } = await supabase.rpc('rotate_calendar_invites', { p_calendar_id: calendar.id })
+    if (rotateError) { setError(`Impossibile revocare gli inviti: ${rotateError.message}`); return }
+    await loadCalendar(user)
+    setNotice('Codici invito rigenerati.')
+  }
+
   if (!supabase) {
     return (
       <main className="setup-screen">
@@ -544,8 +564,8 @@ function App() {
           onMonthChange={(direction) => setDate((current) => direction === 1 ? addMonths(current, 1) : subMonths(current, 1))}
         />}
 
-        <div className="sidebar-section">
-          <div className="section-heading">I miei calendari</div>
+        <details className="sidebar-section" open>
+          <summary className="section-heading">I miei calendari</summary>
           {calendars.map((entry) => (
             <button key={entry.id} className={`filter-row ${entry.id === calendar.id ? 'filter-selected' : ''}`} onClick={() => {
               if (entry.id === calendar.id) return
@@ -559,7 +579,9 @@ function App() {
             </button>
           ))}
           <button className="filter-row" onClick={() => { setError(''); setSetupOpen(true) }}><Plus size={15} /><span>Crea o aggiungi calendario</span></button>
-          <div className="section-heading">Tipi</div>
+        </details>
+        {section === 'calendar' && <details className="sidebar-section" open>
+          <summary className="section-heading">Filtri calendario</summary>
           <button className={`filter-row ${filter === 'all' ? 'filter-selected' : ''}`} onClick={() => setFilter('all')}>
             <span className="color-dot dot-everyone" />
             <span>Tutti</span>
@@ -576,11 +598,11 @@ function App() {
             <span className="color-dot dot-lesson" />
             <span>Lezioni</span>
           </button>
-        </div>
+        </details>}
 
-        <div className="sidebar-section people-section">
+        <details className="sidebar-section people-section" open>
+          <summary className="section-heading">Persone ({members.length})</summary>
           <div className="people-section-head">
-            <div className="section-heading">Persone <span>{members.length}</span></div>
             <button
               className="icon-button profile-edit-button"
               onClick={() => setProfileEditorOpen(true)}
@@ -607,35 +629,36 @@ function App() {
               <span className="member-row-name">{memberDisplayName(member)}</span>
               {member.user_id === user.id && <span className="member-you">Tu</span>}
             </button>
-            <small>{member.role === 'owner' ? 'Proprietario' : member.can_edit ? 'Può modificare' : 'Sola lettura'}</small>
+            <small>{member.role === 'owner' ? 'Amministratore' : member.can_edit ? 'Può modificare' : 'Sola lettura'}</small>
             {currentMember?.role === 'owner' && member.role !== 'owner' && <div>
               <button className="text-button" onClick={() => void manageMember(member, false)}>{member.can_edit ? 'Rendi lettore' : 'Abilita modifica'}</button>
               <button className="text-button" onClick={() => void manageMember(member, true)}>Rimuovi</button>
             </div>}
             </div>
           ))}
-        </div>
+        </details>
 
-        {inviteCode && <div className="invite-card">
+        {inviteCode && editInviteCode && <details className="sidebar-section" open>
+          <summary className="section-heading">Invita persone</summary>
+          {([['Sola lettura', inviteCode], ['Può modificare', editInviteCode]] as const).map(([label, code]) => <div className="invite-card" key={label}>
           <div className="invite-icon"><UsersRound size={17} /></div>
-          <div className="invite-copy">
-            <strong>Condividi con la famiglia</strong>
-            <span>Codice: <b>{inviteCode}</b></span>
-          </div>
+          <div className="invite-copy"><strong>{label}</strong><span>Codice: <b>{code}</b></span></div>
           <button
             className="icon-button copy-button"
-            title="Copia codice invito"
+            title={`Copia codice ${label}`}
             onClick={() => {
               if (!navigator.clipboard) {
                 setError('Copia non disponibile in questo browser o contesto.')
                 return
               }
-              void navigator.clipboard.writeText(inviteCode)
+              void navigator.clipboard.writeText(code)
                 .then(() => setNotice('Codice invito copiato.'))
                 .catch((copyError: unknown) => setError(`Non è stato possibile copiare il codice: ${readableError(copyError)}`))
             }}
           ><Copy size={15} /></button>
-        </div>}
+          </div>)}
+          <button className="text-button" onClick={() => void rotateInvites()}>Revoca e rigenera i codici</button>
+        </details>}
 
         <div className="sidebar-bottom">
           <div className="account-row">

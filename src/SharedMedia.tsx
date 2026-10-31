@@ -147,23 +147,23 @@ export function SharedMedia({ calendarId, canEdit }: { calendarId: string; canEd
   }
 
   return <section className="feature-page">
-    <h2>File e riproduzione condivisa</h2>
+    <header className="feature-hero"><span className="feature-kicker">IL VOSTRO SPAZIO</span><h2>File e riproduzione condivisa</h2><p>Un posto per i vostri file, musica e video.</p></header>
     <p>I file sono visibili a tutti i membri dello spazio. Gli editor possono caricarli, eliminarli e controllare la riproduzione.</p>
     {error && <p className="form-message form-error" role="alert">{error}</p>}
     {notice && <p className="form-message form-notice" role="status">{notice}</p>}
-    {canEdit && <form className="feature-card feature-form" onSubmit={(event) => void upload(event)}>
-      <label>Carica un file (massimo 50 MB)<input ref={fileInputRef} type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} /></label>
+    {canEdit && <details className="feature-card disclosure-card" open><summary>Carica un file</summary><form className="feature-form" onSubmit={(event) => void upload(event)}>
+      <label>File (massimo 50 MB)<input ref={fileInputRef} type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} /></label>
       <button className="primary-button" disabled={busy || !selectedFile}>Carica</button>
-    </form>}
-    <div className="feature-card"><h3>File dello spazio</h3>
+    </form></details>}
+    <details className="feature-card disclosure-card" open><summary>File dello spazio <span className="count-pill">{files.length}</span></summary>
       {files.length === 0 ? <p>Nessun file caricato.</p> : files.map((file) => <div className="feature-row" key={file.name}>
         <span>{displayName(file.name)}{typeof file.metadata?.size === 'number' ? ` · ${(file.metadata.size / 1048576).toFixed(1)} MB` : ''}</span>
         <button disabled={busy} onClick={() => void download(file.name)}>Scarica</button>
         {canEdit && <><button disabled={busy} onClick={() => void control(`${calendarId}/${file.name}`, 0, false)}>Seleziona per riprodurre</button><button disabled={busy} onClick={() => void remove(file.name)}>Elimina</button></>}
       </div>)}
-    </div>
-    <div className="feature-card">
-      <h3>Riproduzione sincronizzata</h3>
+    </details>
+    <details className="feature-card disclosure-card" open>
+      <summary>Riproduzione sincronizzata</summary>
       <p>Ogni dispositivo deve aprire questa sezione e attivare la riproduzione. Sono supportati i formati audio e video riproducibili dal browser; la sincronizzazione è approssimativa e dipende dalla rete.</p>
       <p>{playback ? `${displayName(playback.object_path.split('/').pop() ?? '')} · ${playback.playing ? 'in riproduzione' : 'in pausa'}` : 'Nessun file selezionato.'}</p>
       <button className="primary-button" onClick={() => {
@@ -181,6 +181,6 @@ export function SharedMedia({ calendarId, canEdit }: { calendarId: string; canEd
         <label>Vai al secondo <input type="number" min="0" max="604800" step="1" value={seek} onChange={(event) => setSeek(event.target.value)} /></label>
         <button disabled={busy || seek === '' || !Number.isFinite(Number(seek)) || Number(seek) < 0 || Number(seek) > 604800} onClick={() => void control(playback.object_path, Number(seek), playback.playing)}>Vai</button>
       </div>}
-    </div>
+    </details>
   </section>
 }

@@ -599,4 +599,187 @@ grant execute on function public.get_shared_playback(uuid) to authenticated;
 grant execute on function public.set_shared_playback(uuid, text, double precision, boolean) to authenticated;
 grant execute on function public.clear_shared_playback(uuid, text) to authenticated;
 
+alter table public.calendars add column if not exists edit_invite_code text
+  not null default upper(replace(gen_random_uuid()::text, '-', ''));
+create unique index if not exists calendars_edit_invite_code_idx on public.calendars(edit_invite_code);
+
+create or replace function public.join_calendar_with_code(p_invite_code text)
+returns uuid language plpgsql security definer set search_path = ''
+as $$
+declare found_calendar_id uuid; grant_edit boolean;
+begin
+  if auth.uid() is null then raise exception 'Devi accedere per unirti a un calendario.'; end if;
+  select id, edit_invite_code = upper(trim(p_invite_code)) into found_calendar_id, grant_edit
+    from public.calendars
+    where invite_code = upper(trim(p_invite_code)) or edit_invite_code = upper(trim(p_invite_code));
+  if found_calendar_id is null then raise exception 'Codice invito non valido.'; end if;
+  insert into public.calendar_members (calendar_id, user_id, role, display_name, can_edit)
+    select found_calendar_id, account.id, 'member',
+      coalesce(nullif(btrim(left(split_part(account.email, '@', 1), 40)), ''), 'Membro'), grant_edit
+    from auth.users account where account.id = (select auth.uid())
+  on conflict (calendar_id, user_id) do nothing;
+  return found_calendar_id;
+end;
+$$;
+
+create or replace function public.get_calendar_edit_invite_code(p_calendar_id uuid)
+returns text language plpgsql security definer set search_path = ''
+as $$
+declare result text;
+begin
+  select c.edit_invite_code into result from public.calendars c
+    join public.calendar_members m on m.calendar_id = c.id
+    where c.id = p_calendar_id and m.user_id = (select auth.uid()) and m.role = 'owner';
+  if result is null then raise exception 'Solo il proprietario può accedere al codice.'; end if;
+  return result;
+end;
+$$;
+
+create or replace function public.rotate_calendar_invites(p_calendar_id uuid)
+returns void language plpgsql security definer set search_path = ''
+as $$
+begin
+  if not exists (select 1 from public.calendar_members where calendar_id = p_calendar_id
+    and user_id = (select auth.uid()) and role = 'owner') then
+    raise exception 'Solo il proprietario può revocare gli inviti.';
+  end if;
+  update public.calendars set invite_code = upper(replace(gen_random_uuid()::text, '-', '')),
+    edit_invite_code = upper(replace(gen_random_uuid()::text, '-', '')) where id = p_calendar_id;
+end;
+$$;
+
+create or replace function public.manage_calendar_member(p_calendar_id uuid, p_user_id uuid, p_can_edit boolean, p_remove boolean)
+returns void language plpgsql security definer set search_path = ''
+as $$
+begin
+  if not exists (select 1 from public.calendar_members where calendar_id = p_calendar_id
+    and user_id = (select auth.uid()) and role = 'owner') then
+    raise exception 'Solo il proprietario può gestire i membri.';
+  end if;
+  if not exists (select 1 from public.calendar_members where calendar_id = p_calendar_id
+    and user_id = p_user_id and role = 'member') then
+    raise exception 'Membro non trovato o non modificabile.';
+  end if;
+  if p_remove then
+    update public.calendar_items set visible_to = array_remove(visible_to, p_user_id)
+      where calendar_id = p_calendar_id and p_user_id = any(visible_to);
+    delete from public.calendar_members where calendar_id = p_calendar_id and user_id = p_user_id;
+    perform public.rotate_calendar_invites(p_calendar_id);
+  else
+    update public.calendar_members set can_edit = p_can_edit where calendar_id = p_calendar_id and user_id = p_user_id;
+  end if;
+end;
+$$;
+
+revoke all on function public.get_calendar_edit_invite_code(uuid) from public;
+revoke all on function public.rotate_calendar_invites(uuid) from public;
+grant execute on function public.get_calendar_edit_invite_code(uuid), public.rotate_calendar_invites(uuid) to authenticated;
+
+alter table public.watch_sessions add column if not exists status text not null default 'draft';
+alter table public.watch_items add column if not exists tmdb_id bigint;
+alter table public.watch_items add column if not exists poster_path text;
+alter table public.watch_items add column if not exists release_date text;
+revoke insert on public.watch_sessions from authenticated;
+grant insert (id, calendar_id, name, created_by) on public.watch_sessions to authenticated;
+do $$
+begin
+  alter table public.watch_sessions add constraint watch_sessions_status_check
+    check (status in ('draft', 'voting', 'finished'));
+exception when duplicate_object then null;
+end;
+$$;
+do $$
+begin
+  alter table public.watch_items add constraint watch_items_poster_path_check
+    check (poster_path is null or poster_path ~ '^/[A-Za-z0-9_.-]+$');
+exception when duplicate_object then null;
+end;
+$$;
+create unique index if not exists watch_items_tmdb_unique
+  on public.watch_items(session_id, category, tmdb_id) where tmdb_id is not null;
+update public.watch_sessions s set status = 'voting'
+  where s.status = 'draft' and exists (select 1 from public.watch_votes v where v.session_id = s.id);
+
+create or replace function public.guard_watch_round()
+returns trigger language plpgsql security definer set search_path = ''
+as $$
+declare round_status text; target_session uuid;
+begin
+  if tg_op = 'DELETE' then target_session := old.session_id; else target_session := new.session_id; end if;
+  if tg_op = 'DELETE' and pg_trigger_depth() > 1 then return old; end if;
+  select status into round_status from public.watch_sessions where id = target_session for update;
+  if round_status is null then raise exception 'Sessione non trovata.'; end if;
+  if tg_table_name = 'watch_votes' then
+    if round_status <> 'voting' then raise exception 'La sessione non è in votazione.'; end if;
+  elsif round_status <> 'draft' then
+    raise exception 'Partecipanti e titoli non possono cambiare dopo l’avvio.';
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+drop trigger if exists guard_watch_items on public.watch_items;
+create trigger guard_watch_items before insert or delete on public.watch_items
+for each row execute function public.guard_watch_round();
+drop trigger if exists guard_watch_participants on public.watch_participants;
+create trigger guard_watch_participants before insert or delete on public.watch_participants
+for each row execute function public.guard_watch_round();
+drop trigger if exists guard_watch_votes on public.watch_votes;
+create trigger guard_watch_votes before insert or update on public.watch_votes
+for each row execute function public.guard_watch_round();
+
+create or replace function public.start_watch_round(p_session_id uuid)
+returns void language plpgsql security definer set search_path = ''
+as $$
+declare round_row public.watch_sessions%rowtype;
+begin
+  select * into round_row from public.watch_sessions where id = p_session_id for update;
+  if round_row.id is null or not public.can_edit_calendar(round_row.calendar_id) then
+    raise exception 'Solo un editor dello spazio può avviare la sessione.';
+  end if;
+  if round_row.status <> 'draft' then raise exception 'La sessione è già stata avviata.'; end if;
+  if (select count(*) from public.watch_participants where session_id = p_session_id) < 2 then
+    raise exception 'Servono almeno due partecipanti.';
+  end if;
+  if not exists (select 1 from public.watch_items where session_id = p_session_id) then
+    raise exception 'Aggiungi almeno un titolo.';
+  end if;
+  update public.watch_sessions set status = 'voting' where id = p_session_id;
+end;
+$$;
+
+create or replace function public.finish_watch_round_if_complete(p_session_id uuid)
+returns boolean language plpgsql security definer set search_path = ''
+as $$
+declare round_row public.watch_sessions%rowtype;
+begin
+  select * into round_row from public.watch_sessions where id = p_session_id for update;
+  if round_row.id is null or not public.is_current_user_calendar_member(round_row.calendar_id) then
+    raise exception 'Sessione non accessibile.';
+  end if;
+  if round_row.status = 'finished' then return true; end if;
+  if round_row.status <> 'voting'
+    or (select count(*) from public.watch_participants where session_id = p_session_id) < 2
+    or not exists (select 1 from public.watch_items where session_id = p_session_id)
+    or exists (
+      select 1 from public.watch_participants p cross join public.watch_items i
+      where p.session_id = p_session_id and i.session_id = p_session_id
+        and not exists (select 1 from public.watch_votes v
+          where v.session_id = p_session_id and v.user_id = p.user_id and v.item_id = i.id)
+    ) then return false; end if;
+  update public.watch_sessions set status = 'finished' where id = p_session_id;
+  return true;
+end;
+$$;
+revoke all on function public.start_watch_round(uuid), public.finish_watch_round_if_complete(uuid) from public;
+grant execute on function public.start_watch_round(uuid), public.finish_watch_round_if_complete(uuid) to authenticated;
+
+drop policy if exists "Members read watch votes" on public.watch_votes;
+create policy "Members read watch votes" on public.watch_votes for select to authenticated
+using (exists (
+  select 1 from public.watch_sessions s where s.id = watch_votes.session_id
+    and public.is_current_user_calendar_member(s.calendar_id)
+    and (watch_votes.user_id = (select auth.uid()) or s.status = 'finished')
+));
+
 commit;
