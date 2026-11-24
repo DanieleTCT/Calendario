@@ -278,6 +278,8 @@ alter table public.calendar_members add column if not exists can_edit boolean no
 alter table public.calendar_members alter column can_edit set default false;
 alter table public.calendar_items add column if not exists visibility text not null default 'everyone';
 alter table public.calendar_items add column if not exists visible_to uuid[] not null default '{}';
+alter table public.calendar_items add column if not exists source_provider text;
+alter table public.calendar_items add column if not exists source_uid text;
 
 do $$
 begin
@@ -286,6 +288,26 @@ begin
 exception when duplicate_object then null;
 end;
 $$;
+
+do $$
+begin
+  alter table public.calendar_items add constraint calendar_items_schedule_source_check
+    check (
+      (source_provider is null and source_uid is null)
+      or (
+        source_provider is not null
+        and source_provider in ('polito', 'unito')
+        and source_uid is not null
+        and char_length(source_uid) = 64
+      )
+    );
+exception when duplicate_object then null;
+end;
+$$;
+
+create unique index if not exists calendar_items_schedule_source_uid_idx
+  on public.calendar_items (calendar_id, created_by, source_provider, source_uid)
+  where source_provider is not null and source_uid is not null;
 
 create or replace function public.can_edit_calendar(p_calendar_id uuid)
 returns boolean language sql stable security definer set search_path = ''
@@ -352,6 +374,134 @@ with check (public.can_edit_calendar(calendar_id) and public.can_view_calendar_i
 drop policy if exists "Members can delete calendar items" on public.calendar_items;
 create policy "Members can delete calendar items" on public.calendar_items for delete to authenticated
 using (public.can_edit_calendar(calendar_id) and public.can_view_calendar_item(calendar_id, created_by, visibility, visible_to));
+
+create table if not exists public.calendar_schedule_sources (
+  id uuid primary key default gen_random_uuid(),
+  calendar_id uuid not null references public.calendars(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  provider text not null check (provider in ('polito', 'unito')),
+  feed_url text not null check (char_length(feed_url) between 10 and 2048),
+  created_at timestamptz not null default now(),
+  unique (calendar_id, user_id, provider)
+);
+
+alter table public.calendar_schedule_sources enable row level security;
+revoke all on public.calendar_schedule_sources from anon, authenticated;
+grant select, insert, update, delete on public.calendar_schedule_sources to authenticated;
+
+drop policy if exists "Users read their private schedule links" on public.calendar_schedule_sources;
+create policy "Users read their private schedule links" on public.calendar_schedule_sources for select to authenticated
+using (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Users add their private schedule links" on public.calendar_schedule_sources;
+create policy "Users add their private schedule links" on public.calendar_schedule_sources for insert to authenticated
+with check (user_id = (select auth.uid()) and public.can_edit_calendar(calendar_id));
+drop policy if exists "Users update their private schedule links" on public.calendar_schedule_sources;
+create policy "Users update their private schedule links" on public.calendar_schedule_sources for update to authenticated
+using (user_id = (select auth.uid()) and public.can_edit_calendar(calendar_id))
+with check (user_id = (select auth.uid()) and public.can_edit_calendar(calendar_id));
+drop policy if exists "Users delete their private schedule links" on public.calendar_schedule_sources;
+create policy "Users delete their private schedule links" on public.calendar_schedule_sources for delete to authenticated
+using (user_id = (select auth.uid()) and public.can_edit_calendar(calendar_id));
+
+create or replace function public.sync_calendar_schedule(
+  p_calendar_id uuid,
+  p_provider text,
+  p_from timestamptz,
+  p_until timestamptz,
+  p_events jsonb
+)
+returns integer
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  current_user_id uuid := (select auth.uid());
+  event_data jsonb;
+  event_uid text;
+  event_title text;
+  event_description text;
+  event_start timestamptz;
+  event_end timestamptz;
+  event_all_day boolean;
+  changed_count integer := 0;
+  deleted_count integer := 0;
+begin
+  if current_user_id is null or not public.can_edit_calendar(p_calendar_id) then
+    raise exception 'Solo un editor del calendario può sincronizzare gli orari.';
+  end if;
+  if p_provider is null or p_provider not in ('polito', 'unito')
+    or p_from is null or p_until is null or p_until <= p_from
+    or p_events is null or jsonb_typeof(p_events) <> 'array'
+    or jsonb_array_length(p_events) > 2000 then
+    raise exception 'Parametri di sincronizzazione non validi.';
+  end if;
+
+  for event_data in select value from jsonb_array_elements(p_events) loop
+    if jsonb_typeof(event_data) <> 'object'
+      or jsonb_typeof(event_data->'uid') <> 'string'
+      or jsonb_typeof(event_data->'title') <> 'string'
+      or jsonb_typeof(event_data->'description') <> 'string'
+      or jsonb_typeof(event_data->'starts_at') <> 'string'
+      or jsonb_typeof(event_data->'ends_at') <> 'string'
+      or jsonb_typeof(event_data->'all_day') <> 'boolean' then
+      raise exception 'Evento del feed non valido.';
+    end if;
+    event_uid := event_data->>'uid';
+    event_title := btrim(event_data->>'title');
+    event_description := event_data->>'description';
+    if event_uid !~ '^[0-9a-f]{64}$'
+      or char_length(event_title) not between 1 and 120
+      or char_length(event_description) > 1000 then
+      raise exception 'Evento del feed non valido.';
+    end if;
+    begin
+      event_start := (event_data->>'starts_at')::timestamptz;
+      event_end := (event_data->>'ends_at')::timestamptz;
+    exception when others then
+      raise exception 'Orario dell’evento non valido.';
+    end;
+    event_all_day := (event_data->>'all_day')::boolean;
+    if event_end < event_start or event_start < p_from or event_start >= p_until then
+      raise exception 'Orario dell’evento fuori dall’intervallo sincronizzato.';
+    end if;
+
+    insert into public.calendar_items (
+      calendar_id, title, description, item_type, starts_at, ends_at,
+      all_day, assignee_id, created_by, source_provider, source_uid
+    ) values (
+      p_calendar_id, event_title, event_description, 'lesson', event_start, event_end,
+      event_all_day, current_user_id, current_user_id, p_provider, event_uid
+    )
+    on conflict (calendar_id, created_by, source_provider, source_uid)
+      where source_provider is not null and source_uid is not null
+    do update set
+      title = excluded.title,
+      description = excluded.description,
+      starts_at = excluded.starts_at,
+      ends_at = excluded.ends_at,
+      all_day = excluded.all_day;
+    changed_count := changed_count + 1;
+  end loop;
+
+  delete from public.calendar_items as item
+  where item.calendar_id = p_calendar_id
+    and item.created_by = current_user_id
+    and item.source_provider = p_provider
+    and item.source_uid is not null
+    and item.starts_at >= p_from
+    and item.starts_at < p_until
+    and not exists (
+      select 1
+      from jsonb_array_elements(p_events) as current_event(value)
+      where current_event.value->>'uid' = item.source_uid
+    );
+  get diagnostics deleted_count = row_count;
+  return changed_count + deleted_count;
+end;
+$$;
+revoke all on function public.sync_calendar_schedule(uuid, text, timestamptz, timestamptz, jsonb) from public;
+grant execute on function public.sync_calendar_schedule(uuid, text, timestamptz, timestamptz, jsonb) to authenticated;
 
 revoke select on public.calendars from authenticated;
 grant select (id, name, created_by, created_at) on public.calendars to authenticated;
@@ -521,8 +671,8 @@ end;
 $$;
 
 insert into storage.buckets (id, name, public, file_size_limit)
-values ('family-shared', 'family-shared', false, 52428800)
-on conflict (id) do update set public = false, file_size_limit = 52428800;
+values ('family-shared', 'family-shared', false, null)
+on conflict (id) do update set public = false, file_size_limit = null;
 
 create or replace function public.shared_object_calendar_id(p_name text)
 returns uuid language sql immutable set search_path = ''
@@ -543,6 +693,28 @@ with check (bucket_id = 'family-shared' and public.can_edit_calendar(public.shar
 drop policy if exists "Editors delete shared files" on storage.objects;
 create policy "Editors delete shared files" on storage.objects for delete to authenticated
 using (bucket_id = 'family-shared' and public.can_edit_calendar(public.shared_object_calendar_id(name)));
+
+create or replace function public.shared_stream_calendar_id(p_topic text)
+returns uuid language sql immutable set search_path = ''
+as $$
+  select case when p_topic ~* '^shared-stream:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    then split_part(p_topic, ':', 2)::uuid else null end;
+$$;
+revoke all on function public.shared_stream_calendar_id(text) from public;
+grant execute on function public.shared_stream_calendar_id(text) to authenticated;
+
+drop policy if exists "Calendar members receive shared stream signals" on realtime.messages;
+create policy "Calendar members receive shared stream signals" on realtime.messages for select to authenticated
+using (
+  realtime.messages.extension = 'broadcast'
+  and public.is_current_user_calendar_member(public.shared_stream_calendar_id((select realtime.topic())))
+);
+drop policy if exists "Calendar members send shared stream signals" on realtime.messages;
+create policy "Calendar members send shared stream signals" on realtime.messages for insert to authenticated
+with check (
+  realtime.messages.extension = 'broadcast'
+  and public.is_current_user_calendar_member(public.shared_stream_calendar_id((select realtime.topic())))
+);
 
 create table if not exists public.shared_playback (
   calendar_id uuid primary key references public.calendars(id) on delete cascade,
@@ -817,5 +989,124 @@ drop policy if exists "Users update their own profile" on public.user_profiles;
 create policy "Users update their own profile" on public.user_profiles for update to authenticated
 using (user_id = (select auth.uid()))
 with check (user_id = (select auth.uid()));
+
+alter table public.calendars
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.calendar_members
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.calendar_items
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.watch_sessions
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.watch_participants
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.watch_items
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.watch_votes
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.shared_playback
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.user_profiles
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+
+create table if not exists public.sync_tombstones (
+  table_name text not null check (table_name in (
+    'calendars', 'calendar_members', 'calendar_items', 'watch_sessions',
+    'watch_participants', 'watch_items', 'watch_votes', 'shared_playback',
+    'user_profiles'
+  )),
+  row_key jsonb not null,
+  calendar_id uuid,
+  user_id uuid,
+  deleted_at timestamptz not null default clock_timestamp(),
+  primary key (table_name, row_key)
+);
+
+alter table public.sync_tombstones enable row level security;
+revoke all on public.sync_tombstones from anon, authenticated;
+grant select on public.sync_tombstones to authenticated;
+drop policy if exists "Members read visible sync tombstones" on public.sync_tombstones;
+create policy "Members read visible sync tombstones" on public.sync_tombstones for select to authenticated
+using (
+  user_id = (select auth.uid())
+  or (calendar_id is not null and public.is_current_user_calendar_member(calendar_id))
+);
+
+create or replace function public.touch_sync_updated_at()
+returns trigger language plpgsql set search_path = ''
+as $$
+begin
+  if current_setting('app.syncing', true) is distinct from 'true' then
+    new.sync_updated_at := clock_timestamp();
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.record_sync_tombstone()
+returns trigger language plpgsql security definer set search_path = ''
+as $$
+declare
+  old_row jsonb := to_jsonb(old);
+  row_key_value jsonb;
+  affected_calendar uuid;
+  affected_user uuid;
+begin
+  row_key_value := case tg_table_name
+    when 'calendars' then jsonb_build_object('id', old_row->'id')
+    when 'calendar_members' then jsonb_build_object('calendar_id', old_row->'calendar_id', 'user_id', old_row->'user_id')
+    when 'calendar_items' then jsonb_build_object('id', old_row->'id')
+    when 'watch_sessions' then jsonb_build_object('id', old_row->'id')
+    when 'watch_participants' then jsonb_build_object('session_id', old_row->'session_id', 'user_id', old_row->'user_id')
+    when 'watch_items' then jsonb_build_object('id', old_row->'id')
+    when 'watch_votes' then jsonb_build_object('session_id', old_row->'session_id', 'item_id', old_row->'item_id', 'user_id', old_row->'user_id')
+    when 'shared_playback' then jsonb_build_object('calendar_id', old_row->'calendar_id')
+    when 'user_profiles' then jsonb_build_object('user_id', old_row->'user_id')
+  end;
+  affected_calendar := coalesce(
+    nullif(old_row->>'calendar_id', '')::uuid,
+    case when tg_table_name = 'calendars' then nullif(old_row->>'id', '')::uuid end
+  );
+  if affected_calendar is null and tg_table_name in ('watch_votes') then
+    select calendar_id into affected_calendar from public.watch_sessions
+    where id = (old_row->>'session_id')::uuid;
+  end if;
+  affected_user := coalesce(
+    nullif(old_row->>'user_id', '')::uuid,
+    nullif(old_row->>'created_by', '')::uuid
+  );
+  insert into public.sync_tombstones (table_name, row_key, calendar_id, user_id, deleted_at)
+  values (tg_table_name, row_key_value, affected_calendar, affected_user, clock_timestamp())
+  on conflict (table_name, row_key) do update set
+    calendar_id = excluded.calendar_id,
+    user_id = excluded.user_id,
+    deleted_at = excluded.deleted_at;
+  return old;
+end;
+$$;
+revoke all on function public.record_sync_tombstone() from public;
+
+do $$
+declare table_name text;
+begin
+  foreach table_name in array array[
+    'calendars', 'calendar_members', 'calendar_items', 'watch_sessions',
+    'watch_participants', 'watch_items', 'watch_votes', 'shared_playback',
+    'user_profiles'
+  ] loop
+    execute format('drop trigger if exists touch_sync_updated_at on public.%I', table_name);
+    execute format(
+      'create trigger touch_sync_updated_at before insert or update on public.%I for each row execute function public.touch_sync_updated_at()',
+      table_name
+    );
+    execute format('drop trigger if exists record_sync_tombstone on public.%I', table_name);
+    execute format(
+      'create trigger record_sync_tombstone after delete on public.%I for each row execute function public.record_sync_tombstone()',
+      table_name
+    );
+    execute format('grant select (sync_updated_at) on public.%I to authenticated', table_name);
+  end loop;
+end;
+$$;
 
 commit;

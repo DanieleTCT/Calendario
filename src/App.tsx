@@ -36,8 +36,10 @@ import {
   UsersRound,
   X,
 } from 'lucide-react'
-import { supabase } from './lib/supabase'
+import { setActiveDatabaseUser, supabase } from './lib/supabase'
+import { getDatabaseStatus, subscribeDatabaseStatus } from './lib/databaseStatus'
 import { SharedMedia } from './SharedMedia'
+import { UniversitySchedules } from './UniversitySchedules'
 import { WatchDecider } from './WatchDecider'
 import { ProfileSection } from './ProfileSection'
 import { MiiPortrait, normalizeMii } from './mii'
@@ -123,9 +125,10 @@ function App() {
   const [allMembers, setAllMembers] = useState<CalendarMember[]>([])
   const [profiles, setProfiles] = useState<Record<string, UserProfile>>({})
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [section, setSection] = useState<'calendar' | 'media' | 'watch' | 'profile'>('calendar')
+  const [section, setSection] = useState<'calendar' | 'media' | 'watch' | 'schedules' | 'profile'>('calendar')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
+  const [databaseStatus, setDatabaseStatusState] = useState(getDatabaseStatus)
 
   const user = session?.user ?? null
   const currentMember = members.find((member) => member.user_id === user?.id)
@@ -149,11 +152,13 @@ function App() {
     supabase.auth.getSession().then(({ data, error: sessionError }) => {
       if (!active) return
       if (sessionError) setError(sessionError.message)
+      setActiveDatabaseUser(data.session?.user ?? null)
       setSession(data.session)
       setAuthLoading(false)
     })
 
     const { data } = supabase.auth.onAuthStateChange((_event: AuthChangeEvent, nextSession) => {
+      setActiveDatabaseUser(nextSession?.user ?? null)
       setSession(nextSession)
       setError('')
       setNotice('')
@@ -161,9 +166,12 @@ function App() {
 
     return () => {
       active = false
+      setActiveDatabaseUser(null)
       data.subscription.unsubscribe()
     }
   }, [])
+
+  useEffect(() => subscribeDatabaseStatus(setDatabaseStatusState), [])
 
   const loadCalendar = useCallback(async (currentUser: User) => {
     if (!supabase) return
@@ -253,6 +261,10 @@ function App() {
       if (sequence === loadSequence.current) setDataLoading(false)
     }
   }, [selectedCalendarId])
+
+  const refreshCalendarAfterScheduleSync = useCallback(() => {
+    if (user) void loadCalendar(user)
+  }, [loadCalendar, user])
 
   useEffect(() => {
     if (!user || !supabase) {
@@ -632,6 +644,7 @@ function App() {
         <nav className="sidebar-section" aria-label="Sezioni">
           {([
             ['calendar', 'Calendario'],
+            ['schedules', 'Orari universitari'],
             ['media', 'File e riproduzione'],
             ['watch', 'Watch-decider'],
             ['profile', 'Profilo'],
@@ -765,7 +778,7 @@ function App() {
               <button className="icon-button" onClick={() => navigate(1)} aria-label="Periodo successivo"><ArrowRight size={18} /></button>
             </div>
             <h1 className="date-heading">{formatMonthHeading(date)}</h1></>}
-            {section !== 'calendar' && <h1 className="date-heading">{section === 'profile' ? 'Profilo' : calendar.name}</h1>}
+            {section !== 'calendar' && <h1 className="date-heading">{section === 'profile' ? 'Profilo' : section === 'schedules' ? 'Orari universitari' : calendar.name}</h1>}
           </div>
           <div className="topbar-actions">
             {dataLoading && <LoaderCircle className="loading-icon" size={18} />}
@@ -779,6 +792,13 @@ function App() {
             </button>
           </div>
         </header>
+
+        {['offline', 'syncing', 'warning', 'error'].includes(databaseStatus.mode) && (
+          <div className={`connection-banner ${databaseStatus.mode === 'error' ? 'connection-banner-error' : ''}`} role="status">
+            <strong>{databaseStatus.mode === 'offline' ? 'Modalità locale' : databaseStatus.mode === 'syncing' ? 'Sincronizzazione' : databaseStatus.mode === 'warning' ? 'Avviso sincronizzazione' : 'Stato database'}</strong>
+            <span>{databaseStatus.message}{databaseStatus.mode !== 'warning' && ' Auth e file condivisi richiedono ancora la connessione Supabase.'}</span>
+          </div>
+        )}
 
         {(error || notice) && (
           <div className={`toast ${error ? 'toast-error' : ''}`} role="status">
@@ -811,7 +831,19 @@ function App() {
             />
           )}
         </section>}
-        {section === 'media' && <SharedMedia key={calendar.id} calendarId={calendar.id} canEdit={canEdit} />}
+        {section === 'media' && <SharedMedia
+          key={calendar.id}
+          calendarId={calendar.id}
+          canEdit={canEdit}
+          memberName={currentMember?.display_name || user?.email?.split('@')[0] || 'Membro'}
+        />}
+        {section === 'schedules' && <UniversitySchedules
+          key={calendar.id}
+          calendarId={calendar.id}
+          userId={user.id}
+          canEdit={canEdit}
+          onSynced={refreshCalendarAfterScheduleSync}
+        />}
         {section === 'watch' && <WatchDecider key={calendar.id} calendarId={calendar.id} userId={user.id} canEdit={canEdit} members={members} />}
         {section === 'profile' && <ProfileSection
           key={calendar.id}

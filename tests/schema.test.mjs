@@ -33,6 +33,15 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
       alter table storage.objects enable row level security;
       grant usage on schema storage to authenticated;
       grant select, insert, delete on storage.objects to authenticated;
+      create schema realtime;
+      create table realtime.messages (extension text);
+      alter table realtime.messages enable row level security;
+      grant usage on schema realtime to authenticated;
+      grant select, insert on realtime.messages to authenticated;
+      create function realtime.topic() returns text language sql stable as $$
+        select current_setting('request.jwt.claim.topic', true)
+      $$;
+      grant execute on function realtime.topic() to authenticated;
       create publication supabase_realtime;
     `)
     const schema = await readFile(new URL('../supabase/schema.sql', import.meta.url), 'utf8')
@@ -51,8 +60,15 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
       return (await db.query(sql, params)).rows
     }
 
+    assert.equal((await rows("select file_size_limit from storage.buckets where id = 'family-shared'"))[0].file_size_limit, null)
     await as(owner)
     await db.query('insert into public.calendars (id, name, created_by) values ($1, $2, $3)', [calendar, 'Famiglia', owner])
+    assert.equal((await rows('select id, name, created_by, created_at, sync_updated_at from public.calendars')).length, 1)
+    await assert.rejects(() => rows('select * from public.calendars'))
+    await db.query("select set_config('request.jwt.claim.topic', $1, false)", [`shared-stream:${calendar}`])
+    await db.query("insert into realtime.messages (extension) values ('broadcast')")
+    assert.equal((await rows('select extension from realtime.messages')).length, 1)
+    assert.ok((await rows('select sync_updated_at from public.calendars where id = $1', [calendar]))[0].sync_updated_at)
     const code = (await rows('select public.get_calendar_invite_code($1) as code', [calendar]))[0].code
     await as(editor)
     await db.query('select public.join_calendar_with_code($1)', [code])
@@ -110,7 +126,10 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     assert.equal((await rows('select status from public.watch_sessions where id = $1', [session]))[0].status, 'finished')
     assert.equal((await rows('select * from public.watch_votes')).length, 2)
     assert.equal((await rows('select id from public.calendar_items')).length, 1)
+    const oldVersion = (await rows('select sync_updated_at from public.calendar_items where id = $1', [item]))[0].sync_updated_at
     assert.equal((await rows('update public.calendar_items set title = $1 where id = $2 returning id', ['Aggiornato', item])).length, 1)
+    const newVersion = (await rows('select sync_updated_at from public.calendar_items where id = $1', [item]))[0].sync_updated_at
+    assert.ok(newVersion > oldVersion)
     await assert.rejects(() => db.query('update public.calendar_items set created_by = $1 where id = $2', [editor, item]))
     await db.query('select public.set_shared_playback($1, $2, 12, true)', [calendar, file])
     assert.equal((await rows('select * from public.get_shared_playback($1)', [calendar]))[0].playing, true)
@@ -118,7 +137,10 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     assert.equal((await rows('update public.watch_votes set liked = false where user_id = $1 returning item_id', [viewer])).length, 0)
 
     await as(outsider)
+    await db.query("select set_config('request.jwt.claim.topic', $1, false)", [`shared-stream:${calendar}`])
+    await assert.rejects(() => db.query("insert into realtime.messages (extension) values ('broadcast')"))
     assert.equal((await rows('select id from public.watch_sessions')).length, 0)
+    assert.equal((await rows('select extension from realtime.messages')).length, 0)
     assert.equal((await rows('select name from storage.objects')).length, 0)
     await assert.rejects(() => db.query('select public.get_shared_playback($1)', [calendar]))
     await assert.rejects(() => db.query('insert into public.watch_participants (session_id, calendar_id, user_id) values ($1, $2, $3)', [session, calendar, outsider]))
@@ -139,6 +161,70 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     assert.equal((await rows('select can_edit from public.calendar_members where user_id = $1', [viewer]))[0].can_edit, true)
     await as(owner)
     assert.equal((await rows('delete from public.watch_sessions where id = $1 returning id', [session])).length, 1)
+    assert.equal((await rows("select row_key from public.sync_tombstones where table_name = 'watch_sessions' and row_key = jsonb_build_object('id', $1::text)", [session])).length, 1)
+
+    await db.query(
+      `insert into public.calendar_schedule_sources (calendar_id, user_id, provider, feed_url)
+       values ($1, $2, 'polito', 'https://my.polito.it/orari.ics')`,
+      [calendar, owner],
+    )
+    assert.equal((await rows('select id from public.calendar_schedule_sources')).length, 1)
+    const from = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    const until = new Date(Date.now() + 400 * 24 * 60 * 60 * 1000).toISOString()
+    const event = {
+      uid: 'a'.repeat(64),
+      title: 'Analisi matematica',
+      description: 'Aula 1',
+      starts_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      ends_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+      all_day: false,
+    }
+    await as(outsider)
+    assert.equal((await rows('select id from public.calendar_schedule_sources')).length, 0)
+    await assert.rejects(() => db.query(
+      `insert into public.calendar_schedule_sources (calendar_id, user_id, provider, feed_url)
+       values ($1, $2, 'unito', 'https://unito.prod.up.cineca.it/orari.ics')`,
+      [calendar, outsider],
+    ))
+    await assert.rejects(() => db.query('select public.sync_calendar_schedule($1, $2, $3, $4, $5::jsonb)', [
+      calendar, 'polito', from, until, JSON.stringify([event]),
+    ]))
+    await as(owner)
+    await db.query('select public.sync_calendar_schedule($1, $2, $3, $4, $5::jsonb)', [
+      calendar, 'polito', from, until, JSON.stringify([event]),
+    ])
+    let imported = (await rows(
+      'select id, visibility, visible_to, assignee_id, item_type, source_provider, source_uid from public.calendar_items where source_uid = $1',
+      [event.uid],
+    ))[0]
+    assert.equal(imported.visibility, 'everyone')
+    assert.equal(imported.assignee_id, owner)
+    assert.equal(imported.item_type, 'lesson')
+    assert.equal(imported.source_provider, 'polito')
+
+    await db.query(
+      'update public.calendar_items set visibility = $1, visible_to = array[$2::uuid], assignee_id = $3 where id = $4',
+      ['selected', editor, editor, imported.id],
+    )
+    await db.query('select public.sync_calendar_schedule($1, $2, $3, $4, $5::jsonb)', [
+      calendar, 'polito', from, until, JSON.stringify([{ ...event, title: 'Analisi aggiornata' }]),
+    ])
+    imported = (await rows(
+      'select title, visibility, visible_to, assignee_id from public.calendar_items where id = $1',
+      [imported.id],
+    ))[0]
+    assert.equal(imported.title, 'Analisi aggiornata')
+    assert.equal(imported.visibility, 'selected')
+    assert.deepEqual(imported.visible_to, [editor])
+    assert.equal(imported.assignee_id, editor)
+
+    await as(editor)
+    assert.equal((await rows('select id from public.calendar_schedule_sources')).length, 0)
+    await as(owner)
+    await db.query('select public.sync_calendar_schedule($1, $2, $3, $4, $5::jsonb)', [
+      calendar, 'polito', from, until, '[]',
+    ])
+    assert.equal((await rows('select id from public.calendar_items where source_uid = $1', [event.uid])).length, 0)
   } finally {
     await db.close()
   }
@@ -163,6 +249,15 @@ test('profili Mii leggibili solo ai membri dei calendari condivisi e modificabil
       alter table storage.objects enable row level security;
       grant usage on schema storage to authenticated;
       grant select, insert, delete on storage.objects to authenticated;
+      create schema realtime;
+      create table realtime.messages (extension text);
+      alter table realtime.messages enable row level security;
+      grant usage on schema realtime to authenticated;
+      grant select, insert on realtime.messages to authenticated;
+      create function realtime.topic() returns text language sql stable as $$
+        select current_setting('request.jwt.claim.topic', true)
+      $$;
+      grant execute on function realtime.topic() to authenticated;
       create publication supabase_realtime;
     `)
     await db.exec(await readFile(new URL('../supabase/schema.sql', import.meta.url), 'utf8'))
