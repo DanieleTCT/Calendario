@@ -15,11 +15,17 @@ type OutboxRow = {
 type SyncProgress = (message: string) => void
 type SyncResult = { discardedLockedChanges: number }
 
+const sharedStorageBucket = 'family-shared'
+
 const syncTables = [
   'calendars',
   'calendar_members',
   'calendar_items',
   'calendar_view_preferences',
+  'shared_audio_playlists',
+  'shared_audio_playlist_items',
+  'shared_audio_favorites',
+  'shared_audio_player_settings',
   'watch_sessions',
   'watch_participants',
   'watch_items',
@@ -34,6 +40,10 @@ const primaryKeys: Record<SyncTable, string[]> = {
   calendar_members: ['calendar_id', 'user_id'],
   calendar_items: ['id'],
   calendar_view_preferences: ['calendar_id', 'user_id'],
+  shared_audio_playlists: ['id'],
+  shared_audio_playlist_items: ['playlist_id', 'object_path'],
+  shared_audio_favorites: ['calendar_id', 'user_id', 'object_path'],
+  shared_audio_player_settings: ['calendar_id'],
   watch_sessions: ['id'],
   watch_participants: ['session_id', 'user_id'],
   watch_items: ['id'],
@@ -46,6 +56,10 @@ const selectableColumns: Record<SyncTable, string[]> = {
   calendar_members: ['calendar_id', 'user_id', 'role', 'display_name', 'color', 'created_at', 'can_edit', 'style_border', 'allow_style_editors', 'sync_updated_at'],
   calendar_items: ['id', 'calendar_id', 'title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'created_by', 'created_at', 'updated_at', 'visibility', 'visible_to', 'editable_by', 'tags', 'sync_updated_at'],
   calendar_view_preferences: ['calendar_id', 'user_id', 'hidden_item_ids', 'hidden_member_ids', 'category_styles', 'updated_at', 'sync_updated_at'],
+  shared_audio_playlists: ['id', 'calendar_id', 'name', 'is_queue', 'created_by', 'created_at', 'updated_at', 'sync_updated_at'],
+  shared_audio_playlist_items: ['playlist_id', 'calendar_id', 'object_path', 'position', 'added_by', 'added_at', 'sync_updated_at'],
+  shared_audio_favorites: ['calendar_id', 'user_id', 'object_path', 'created_at', 'sync_updated_at'],
+  shared_audio_player_settings: ['calendar_id', 'active_playlist_id', 'shuffle', 'repeat_mode', 'updated_at', 'sync_updated_at'],
   watch_sessions: ['id', 'calendar_id', 'name', 'created_by', 'created_at', 'status', 'sync_updated_at'],
   watch_participants: ['session_id', 'calendar_id', 'user_id', 'joined_at', 'sync_updated_at'],
   watch_items: ['id', 'session_id', 'calendar_id', 'title', 'category', 'tags', 'created_by', 'created_at', 'tmdb_id', 'poster_path', 'release_date', 'sync_updated_at'],
@@ -58,6 +72,10 @@ const insertColumns: Record<SyncTable, string[]> = {
   calendar_members: [],
   calendar_items: ['id', 'calendar_id', 'title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'created_by', 'visibility', 'visible_to', 'editable_by', 'tags'],
   calendar_view_preferences: ['calendar_id', 'user_id', 'hidden_item_ids', 'hidden_member_ids', 'category_styles'],
+  shared_audio_playlists: ['calendar_id', 'name', 'is_queue', 'created_by'],
+  shared_audio_playlist_items: ['playlist_id', 'calendar_id', 'object_path', 'position', 'added_by'],
+  shared_audio_favorites: ['calendar_id', 'user_id', 'object_path'],
+  shared_audio_player_settings: ['calendar_id', 'active_playlist_id', 'shuffle', 'repeat_mode'],
   watch_sessions: ['id', 'calendar_id', 'name', 'created_by'],
   watch_participants: ['session_id', 'calendar_id', 'user_id'],
   watch_items: ['id', 'session_id', 'calendar_id', 'title', 'category', 'tags', 'created_by', 'tmdb_id', 'poster_path', 'release_date'],
@@ -70,6 +88,10 @@ const updateColumns: Record<SyncTable, string[]> = {
   calendar_members: ['display_name', 'color', 'style_border', 'allow_style_editors'],
   calendar_items: ['title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'visibility', 'visible_to', 'editable_by', 'tags'],
   calendar_view_preferences: ['hidden_item_ids', 'hidden_member_ids', 'category_styles'],
+  shared_audio_playlists: ['name'],
+  shared_audio_playlist_items: ['position'],
+  shared_audio_favorites: [],
+  shared_audio_player_settings: ['active_playlist_id', 'shuffle', 'repeat_mode'],
   watch_sessions: [],
   watch_participants: [],
   watch_items: ['title', 'category', 'tags', 'tmdb_id', 'poster_path', 'release_date'],
@@ -88,6 +110,11 @@ const rpcSql: Record<string, { params: string[]; sql: string; result: 'rows' | '
   clear_shared_playback: { params: ['p_calendar_id', 'p_object_path'], sql: 'select public.clear_shared_playback($1, $2)', result: 'void' },
   start_watch_round: { params: ['p_session_id'], sql: 'select public.start_watch_round($1)', result: 'void' },
   finish_watch_round_if_complete: { params: ['p_session_id'], sql: 'select public.finish_watch_round_if_complete($1) as value', result: 'scalar' },
+  add_shared_audio_playlist_item: { params: ['p_calendar_id', 'p_playlist_id', 'p_object_path'], sql: 'select public.add_shared_audio_playlist_item($1, $2, $3)', result: 'void' },
+  move_shared_audio_playlist_item: { params: ['p_calendar_id', 'p_playlist_id', 'p_object_path', 'p_new_position'], sql: 'select public.move_shared_audio_playlist_item($1, $2, $3, $4)', result: 'void' },
+  remove_shared_audio_playlist_item: { params: ['p_calendar_id', 'p_playlist_id', 'p_object_path'], sql: 'select public.remove_shared_audio_playlist_item($1, $2, $3)', result: 'void' },
+  remove_shared_audio_path: { params: ['p_calendar_id', 'p_object_path'], sql: 'select public.remove_shared_audio_path($1, $2)', result: 'void' },
+  advance_shared_playback: { params: ['p_calendar_id', 'p_current_path', 'p_direction'], sql: 'select public.advance_shared_playback($1, $2, $3)', result: 'void' },
 }
 
 let databasePromise: Promise<LocalDb> | null = null
@@ -146,8 +173,9 @@ async function openDatabase(): Promise<LocalDb> {
           id text primary key, name text, public boolean, file_size_limit bigint
         );
         create table if not exists storage.objects (
-          id uuid default gen_random_uuid(), bucket_id text, name text
+          id uuid default gen_random_uuid(), bucket_id text, name text, metadata jsonb
         );
+        alter table storage.objects add column if not exists metadata jsonb;
         alter table storage.objects enable row level security;
         grant usage on schema storage to authenticated;
         grant select, insert, delete on storage.objects to authenticated;
@@ -334,6 +362,12 @@ function policySql(table: SyncTable, operation: 'select' | 'update' | 'delete') 
         return 'public.is_current_user_calendar_member(calendar_id)'
       case 'calendar_view_preferences':
         return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
+      case 'shared_audio_playlists':
+      case 'shared_audio_playlist_items':
+      case 'shared_audio_player_settings':
+        return 'public.is_current_user_calendar_member(calendar_id)'
+      case 'shared_audio_favorites':
+        return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
       case 'calendar_items':
         return 'public.can_view_calendar_item(calendar_id, created_by, visibility, visible_to)'
       case 'watch_votes':
@@ -360,6 +394,10 @@ function policySql(table: SyncTable, operation: 'select' | 'update' | 'delete') 
         return 'public.can_edit_calendar_item(calendar_id, created_by, editable_by)'
       case 'calendar_view_preferences':
         return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
+      case 'shared_audio_playlists':
+      case 'shared_audio_playlist_items':
+      case 'shared_audio_player_settings':
+        return 'public.is_current_user_calendar_member(calendar_id)'
       case 'watch_votes':
         return `user_id = auth.uid() and exists (
           select 1 from public.watch_participants p
@@ -377,6 +415,12 @@ function policySql(table: SyncTable, operation: 'select' | 'update' | 'delete') 
     case 'calendar_items':
       return 'public.can_edit_calendar_item(calendar_id, created_by, editable_by)'
     case 'calendar_view_preferences':
+      return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
+    case 'shared_audio_playlists':
+      return 'not is_queue and public.is_current_user_calendar_member(calendar_id)'
+    case 'shared_audio_playlist_items':
+      return 'public.is_current_user_calendar_member(calendar_id)'
+    case 'shared_audio_favorites':
       return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
     case 'watch_sessions':
     case 'watch_items':
@@ -425,6 +469,22 @@ async function assertInsertAllowed(database: LocalDb, user: LocalUser, table: Sy
     case 'calendar_view_preferences':
       condition = '$1::uuid = auth.uid() and public.is_current_user_calendar_member($2::uuid)'
       values = [row.user_id, row.calendar_id]
+      break
+    case 'shared_audio_playlists':
+      condition = '$1::uuid = auth.uid() and not $2::boolean and public.is_current_user_calendar_member($3::uuid)'
+      values = [row.created_by, row.is_queue, row.calendar_id]
+      break
+    case 'shared_audio_playlist_items':
+      condition = '$1::uuid = auth.uid() and public.is_current_user_calendar_member($2::uuid)'
+      values = [row.added_by, row.calendar_id]
+      break
+    case 'shared_audio_favorites':
+      condition = '$1::uuid = auth.uid() and public.is_current_user_calendar_member($2::uuid)'
+      values = [row.user_id, row.calendar_id]
+      break
+    case 'shared_audio_player_settings':
+      condition = 'public.is_current_user_calendar_member($1::uuid)'
+      values = [row.calendar_id]
       break
     default:
       condition = 'false'
@@ -543,6 +603,10 @@ function rpcOutboxTarget(name: string, args: Row, result: unknown, user: LocalUs
       return { table: 'watch_sessions', key: { id: args.p_session_id } }
     case 'finish_watch_round_if_complete':
       return result === true ? { table: 'watch_sessions', key: { id: args.p_session_id } } : null
+    case 'add_shared_audio_playlist_item':
+    case 'move_shared_audio_playlist_item':
+    case 'remove_shared_audio_playlist_item':
+      return { table: 'shared_audio_playlist_items', key: { playlist_id: args.p_playlist_id, object_path: args.p_object_path } }
     default:
       return null
   }
@@ -756,6 +820,30 @@ export function mirrorRemoteResponse(tableName: string, method: string, data: un
   return serializeDatabaseTask(() => mirrorRemoteResponseLocked(tableName, method, data))
 }
 
+export function mirrorSharedFiles(calendarId: string, files: Array<{ name: string; metadata: Record<string, unknown> | null }>) {
+  return serializeDatabaseTask(async () => {
+    const database = await openDatabase()
+    for (const file of files) {
+      const objectName = `${calendarId}/${file.name}`
+      const existing = await database.query(
+        'select 1 from storage.objects where bucket_id = $1 and name = $2 limit 1',
+        [sharedStorageBucket, objectName],
+      )
+      if (existing.rows.length) {
+        await database.query(
+          'update storage.objects set metadata = $1::jsonb where bucket_id = $2 and name = $3',
+          [JSON.stringify(file.metadata ?? {}), sharedStorageBucket, objectName],
+        )
+      } else {
+        await database.query(
+          'insert into storage.objects (bucket_id, name, metadata) values ($1, $2, $3::jsonb)',
+          [sharedStorageBucket, objectName, JSON.stringify(file.metadata ?? {})],
+        )
+      }
+    }
+  })
+}
+
 async function remoteRequest(url: string, apiKey: string, accessToken: string, path: string, init: RequestInit = {}) {
   const { response, body } = await fetchForSync(`${url.replace(/\/$/, '')}/rest/v1/${path}`, {
     ...init,
@@ -847,7 +935,7 @@ async function seedAuthUsers(database: LocalDb, user: LocalUser | null, rows: Ro
   const ids = new Set<string>(user ? [user.id] : [])
   for (const group of rows) {
     for (const row of group) {
-      for (const column of ['created_by', 'assignee_id', 'user_id']) {
+      for (const column of ['created_by', 'assignee_id', 'user_id', 'added_by']) {
         if (typeof row[column] === 'string') ids.add(row[column] as string)
       }
       if (Array.isArray(row.visible_to)) {

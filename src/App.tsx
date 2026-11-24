@@ -858,7 +858,7 @@ function App() {
           {([
             ['calendar', 'Calendario'],
             ['schedules', 'Orari universitari'],
-            ['media', 'File e riproduzione'],
+            ['media', 'Audio player'],
             ['watch', 'Watch-decider'],
             ['profile', 'Profilo'],
           ] as const).map(([value, label]) => <button key={value} className={`filter-row ${section === value ? 'filter-selected' : ''}`} onClick={() => { setSection(value); setSidebarOpen(false) }}>{label}</button>)}
@@ -1039,10 +1039,10 @@ function App() {
           </div>
         </header>
 
-        {['offline', 'syncing', 'warning', 'error'].includes(databaseStatus.mode) && (
+        {['offline', 'error'].includes(databaseStatus.mode) && (
           <div className={`connection-banner ${databaseStatus.mode === 'error' ? 'connection-banner-error' : ''}`} role="status">
-            <strong>{databaseStatus.mode === 'offline' ? 'Modalità locale' : databaseStatus.mode === 'syncing' ? 'Sincronizzazione' : databaseStatus.mode === 'warning' ? 'Avviso sincronizzazione' : 'Stato database'}</strong>
-            <span>{databaseStatus.message}{databaseStatus.mode !== 'warning' && ' Auth e file condivisi richiedono ancora la connessione Supabase.'}</span>
+            <strong>{databaseStatus.mode === 'offline' ? 'Connessione Supabase' : 'Stato database'}</strong>
+            <span>{databaseStatus.message}</span>
           </div>
         )}
 
@@ -1085,6 +1085,7 @@ function App() {
           key={calendar.id}
           calendarId={calendar.id}
           canEdit={canEdit}
+          userId={user.id}
           memberName={currentMember?.display_name || user?.email?.split('@')[0] || 'Membro'}
         />}
         {section === 'schedules' && <UniversitySchedules

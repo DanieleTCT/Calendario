@@ -13,9 +13,7 @@ export default defineConfig(({ mode }) => {
       exclude: ['@electric-sql/pglite'],
     },
     resolve: {
-      alias: mode === 'development'
-        ? []
-        : [{ find: './localDatabase', replacement: disabledLocalDatabase }],
+      alias: [{ find: './localDatabase', replacement: disabledLocalDatabase }],
     },
     plugins: [react(), {
       name: 'api-routes',

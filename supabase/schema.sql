@@ -851,6 +851,429 @@ drop policy if exists "Editors delete shared files" on storage.objects;
 create policy "Editors delete shared files" on storage.objects for delete to authenticated
 using (bucket_id = 'family-shared' and public.can_edit_calendar(public.shared_object_calendar_id(name)));
 
+create or replace function public.is_shared_audio(p_calendar_id uuid, p_object_path text)
+returns boolean language sql stable security definer set search_path = ''
+as $$
+  select public.shared_object_calendar_id(p_object_path) = p_calendar_id
+    and exists (
+      select 1
+      from storage.objects object
+      where object.bucket_id = 'family-shared'
+        and object.name = p_object_path
+        and (
+          lower(coalesce(object.metadata->>'mimetype', '')) like 'audio/%'
+          or lower(object.name) ~ '\.(mp3|m4a|aac|wav|ogg|opus|flac|wma|aiff)$'
+        )
+    );
+$$;
+revoke all on function public.is_shared_audio(uuid, text) from public;
+grant execute on function public.is_shared_audio(uuid, text) to authenticated;
+
+create table if not exists public.shared_audio_playlists (
+  id uuid primary key default gen_random_uuid(),
+  calendar_id uuid not null references public.calendars(id) on delete cascade,
+  name text not null check (char_length(btrim(name)) between 1 and 60),
+  is_queue boolean not null default false,
+  created_by uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create unique index if not exists shared_audio_playlist_name_idx
+  on public.shared_audio_playlists(calendar_id, lower(name)) where not is_queue;
+alter table public.shared_audio_playlists enable row level security;
+revoke all on public.shared_audio_playlists from anon, authenticated;
+grant select, insert, update, delete on public.shared_audio_playlists to authenticated;
+drop policy if exists "Members read shared audio playlists" on public.shared_audio_playlists;
+create policy "Members read shared audio playlists" on public.shared_audio_playlists for select to authenticated
+using (public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Members create shared audio playlists" on public.shared_audio_playlists;
+create policy "Members create shared audio playlists" on public.shared_audio_playlists for insert to authenticated
+with check (created_by = (select auth.uid()) and not is_queue and public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Members update shared audio playlists" on public.shared_audio_playlists;
+create policy "Members update shared audio playlists" on public.shared_audio_playlists for update to authenticated
+using (not is_queue and public.is_current_user_calendar_member(calendar_id))
+with check (not is_queue and public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Members delete shared audio playlists" on public.shared_audio_playlists;
+create policy "Members delete shared audio playlists" on public.shared_audio_playlists for delete to authenticated
+using (not is_queue and public.is_current_user_calendar_member(calendar_id));
+
+create or replace function public.check_shared_audio_playlist()
+returns trigger language plpgsql security definer set search_path = ''
+as $$
+begin
+  if tg_op = 'UPDATE' then
+    if new.calendar_id is distinct from old.calendar_id
+      or new.created_by is distinct from old.created_by
+      or new.is_queue is distinct from old.is_queue
+      or old.is_queue then
+      raise exception 'La coda condivisa non si può rinominare o sostituire.';
+    end if;
+  elsif new.is_queue then
+    if new.name <> 'Coda condivisa'
+      or not exists (select 1 from public.calendars where id = new.calendar_id and created_by = new.created_by) then
+      raise exception 'La coda condivisa non è valida.';
+    end if;
+  elsif new.created_by <> (select auth.uid()) then
+    raise exception 'La playlist condivisa non è valida.';
+  end if;
+  return new;
+end;
+$$;
+
+create table if not exists public.shared_audio_playlist_items (
+  playlist_id uuid not null references public.shared_audio_playlists(id) on delete cascade,
+  calendar_id uuid not null references public.calendars(id) on delete cascade,
+  object_path text not null,
+  position integer not null check (position >= 0),
+  added_by uuid not null references auth.users(id) on delete cascade,
+  added_at timestamptz not null default now(),
+  primary key (playlist_id, object_path)
+);
+create index if not exists shared_audio_playlist_items_order_idx
+  on public.shared_audio_playlist_items(playlist_id, position, added_at);
+alter table public.shared_audio_playlist_items enable row level security;
+revoke all on public.shared_audio_playlist_items from anon, authenticated;
+grant select, insert, update, delete on public.shared_audio_playlist_items to authenticated;
+drop policy if exists "Members read shared audio playlist items" on public.shared_audio_playlist_items;
+create policy "Members read shared audio playlist items" on public.shared_audio_playlist_items for select to authenticated
+using (public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Members add shared audio playlist items" on public.shared_audio_playlist_items;
+create policy "Members add shared audio playlist items" on public.shared_audio_playlist_items for insert to authenticated
+with check (added_by = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Members update shared audio playlist items" on public.shared_audio_playlist_items;
+create policy "Members update shared audio playlist items" on public.shared_audio_playlist_items for update to authenticated
+using (public.is_current_user_calendar_member(calendar_id))
+with check (public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Members delete shared audio playlist items" on public.shared_audio_playlist_items;
+create policy "Members delete shared audio playlist items" on public.shared_audio_playlist_items for delete to authenticated
+using (public.is_current_user_calendar_member(calendar_id));
+
+create or replace function public.check_shared_audio_playlist_item()
+returns trigger language plpgsql security definer set search_path = ''
+as $$
+begin
+  if tg_op = 'UPDATE' and (
+    new.playlist_id is distinct from old.playlist_id
+    or new.calendar_id is distinct from old.calendar_id
+    or new.object_path is distinct from old.object_path
+    or new.added_by is distinct from old.added_by
+  ) then
+    raise exception 'Gli elementi non si possono spostare tra playlist.';
+  end if;
+  if not exists (
+    select 1 from public.shared_audio_playlists playlist
+    where playlist.id = new.playlist_id and playlist.calendar_id = new.calendar_id
+  ) then
+    raise exception 'La playlist non appartiene a questo spazio.';
+  end if;
+  if current_setting('app.syncing', true) is distinct from 'true' then
+    if not public.is_shared_audio(new.calendar_id, new.object_path) then
+      raise exception 'Il file indicato non è un audio condiviso.';
+    end if;
+    if tg_op = 'INSERT' and new.added_by <> (select auth.uid()) then
+      raise exception 'Il membro che aggiunge il brano non è valido.';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+create table if not exists public.shared_audio_favorites (
+  calendar_id uuid not null references public.calendars(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  object_path text not null,
+  created_at timestamptz not null default now(),
+  primary key (calendar_id, user_id, object_path)
+);
+alter table public.shared_audio_favorites enable row level security;
+revoke all on public.shared_audio_favorites from anon, authenticated;
+grant select, insert, delete on public.shared_audio_favorites to authenticated;
+drop policy if exists "Users read their shared audio favorites" on public.shared_audio_favorites;
+create policy "Users read their shared audio favorites" on public.shared_audio_favorites for select to authenticated
+using (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Users add their shared audio favorites" on public.shared_audio_favorites;
+create policy "Users add their shared audio favorites" on public.shared_audio_favorites for insert to authenticated
+with check (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id)
+  and public.is_shared_audio(calendar_id, object_path));
+drop policy if exists "Users remove their shared audio favorites" on public.shared_audio_favorites;
+create policy "Users remove their shared audio favorites" on public.shared_audio_favorites for delete to authenticated
+using (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+
+create table if not exists public.shared_audio_player_settings (
+  calendar_id uuid primary key references public.calendars(id) on delete cascade,
+  active_playlist_id uuid not null references public.shared_audio_playlists(id),
+  shuffle boolean not null default false,
+  repeat_mode text not null default 'off' check (repeat_mode in ('off', 'all', 'one')),
+  updated_at timestamptz not null default now()
+);
+
+drop trigger if exists check_shared_audio_playlist on public.shared_audio_playlists;
+drop trigger if exists check_shared_audio_playlist_item on public.shared_audio_playlist_items;
+lock table public.shared_audio_playlists, public.shared_audio_playlist_items,
+  public.shared_audio_player_settings in share row exclusive mode;
+do $$
+declare duplicate_calendar record; queue_id uuid;
+begin
+  perform set_config('app.syncing', 'true', true);
+  for duplicate_calendar in
+    select calendar_id
+    from public.shared_audio_playlists
+    where is_queue
+    group by calendar_id
+    having count(*) > 1
+  loop
+    select playlist.id into queue_id
+    from public.shared_audio_playlists playlist
+    left join public.shared_audio_player_settings settings
+      on settings.calendar_id = playlist.calendar_id
+    where playlist.calendar_id = duplicate_calendar.calendar_id and playlist.is_queue
+    order by (settings.active_playlist_id = playlist.id) desc nulls last,
+      playlist.created_at, playlist.id
+    limit 1;
+
+    update public.shared_audio_player_settings
+    set active_playlist_id = queue_id
+    where calendar_id = duplicate_calendar.calendar_id
+      and active_playlist_id in (
+        select id from public.shared_audio_playlists
+        where calendar_id = duplicate_calendar.calendar_id
+          and is_queue and id <> queue_id
+      );
+
+    insert into public.shared_audio_playlist_items
+      (playlist_id, calendar_id, object_path, position, added_by, added_at)
+    select queue_id, item.calendar_id, item.object_path, item.position, item.added_by, item.added_at
+    from public.shared_audio_playlist_items item
+    join public.shared_audio_playlists duplicate
+      on duplicate.id = item.playlist_id
+    where duplicate.calendar_id = duplicate_calendar.calendar_id
+      and duplicate.is_queue and duplicate.id <> queue_id
+    order by item.position, item.added_at, item.object_path
+    on conflict (playlist_id, object_path) do nothing;
+
+    delete from public.shared_audio_playlist_items item
+    using public.shared_audio_playlists duplicate
+    where duplicate.id = item.playlist_id
+      and duplicate.calendar_id = duplicate_calendar.calendar_id
+      and duplicate.is_queue and duplicate.id <> queue_id;
+
+    delete from public.shared_audio_playlists
+    where calendar_id = duplicate_calendar.calendar_id
+      and is_queue and id <> queue_id;
+
+    with ordered_items as (
+      select ctid, (row_number() over (order by position, added_at, object_path) - 1)::integer as new_position
+      from public.shared_audio_playlist_items
+      where playlist_id = queue_id
+    )
+    update public.shared_audio_playlist_items item
+    set position = ordered_items.new_position
+    from ordered_items
+    where item.ctid = ordered_items.ctid;
+  end loop;
+end;
+$$;
+create unique index if not exists shared_audio_one_queue_per_calendar_idx
+  on public.shared_audio_playlists(calendar_id) where is_queue;
+create trigger check_shared_audio_playlist before insert or update on public.shared_audio_playlists
+for each row execute function public.check_shared_audio_playlist();
+create trigger check_shared_audio_playlist_item before insert or update on public.shared_audio_playlist_items
+for each row execute function public.check_shared_audio_playlist_item();
+
+alter table public.shared_audio_player_settings enable row level security;
+revoke all on public.shared_audio_player_settings from anon, authenticated;
+grant select, insert, update on public.shared_audio_player_settings to authenticated;
+drop policy if exists "Members read shared audio player settings" on public.shared_audio_player_settings;
+create policy "Members read shared audio player settings" on public.shared_audio_player_settings for select to authenticated
+using (public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Members add shared audio player settings" on public.shared_audio_player_settings;
+create policy "Members add shared audio player settings" on public.shared_audio_player_settings for insert to authenticated
+with check (public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Members update shared audio player settings" on public.shared_audio_player_settings;
+create policy "Members update shared audio player settings" on public.shared_audio_player_settings for update to authenticated
+using (public.is_current_user_calendar_member(calendar_id))
+with check (public.is_current_user_calendar_member(calendar_id));
+
+create or replace function public.check_shared_audio_player_settings()
+returns trigger language plpgsql security definer set search_path = ''
+as $$
+begin
+  if not exists (
+    select 1 from public.shared_audio_playlists playlist
+    where playlist.id = new.active_playlist_id and playlist.calendar_id = new.calendar_id
+  ) then
+    raise exception 'La playlist attiva non appartiene a questo spazio.';
+  end if;
+  new.updated_at := clock_timestamp();
+  return new;
+end;
+$$;
+drop trigger if exists check_shared_audio_player_settings on public.shared_audio_player_settings;
+create trigger check_shared_audio_player_settings before insert or update on public.shared_audio_player_settings
+for each row execute function public.check_shared_audio_player_settings();
+
+do $$
+declare table_name text;
+begin
+  foreach table_name in array array[
+    'shared_audio_playlists', 'shared_audio_playlist_items',
+    'shared_audio_favorites', 'shared_audio_player_settings'
+  ] loop
+    begin
+      execute format('alter publication supabase_realtime add table public.%I', table_name);
+    exception when duplicate_object or undefined_object then null;
+    end;
+  end loop;
+end;
+$$;
+
+create or replace function public.add_shared_audio_playlist_item(
+  p_calendar_id uuid, p_playlist_id uuid, p_object_path text
+)
+returns void language plpgsql security definer set search_path = ''
+as $$
+declare next_position integer;
+begin
+  if not public.is_current_user_calendar_member(p_calendar_id)
+    or not public.is_shared_audio(p_calendar_id, p_object_path) then
+    raise exception 'Il file audio o lo spazio non è accessibile.';
+  end if;
+  perform 1 from public.shared_audio_playlists
+    where id = p_playlist_id and calendar_id = p_calendar_id for update;
+  if not found then raise exception 'Playlist non trovata.'; end if;
+  select coalesce(max(position) + 1, 0) into next_position
+    from public.shared_audio_playlist_items where playlist_id = p_playlist_id;
+  insert into public.shared_audio_playlist_items
+    (playlist_id, calendar_id, object_path, position, added_by)
+  values (p_playlist_id, p_calendar_id, p_object_path, next_position, (select auth.uid()))
+  on conflict (playlist_id, object_path) do nothing;
+end;
+$$;
+
+create or replace function public.move_shared_audio_playlist_item(
+  p_calendar_id uuid, p_playlist_id uuid, p_object_path text, p_new_position integer
+)
+returns void language plpgsql security definer set search_path = ''
+as $$
+declare old_position integer; item_count integer;
+begin
+  if not public.is_current_user_calendar_member(p_calendar_id) or p_new_position < 0 then
+    raise exception 'Posizione o spazio non valido.';
+  end if;
+  perform 1 from public.shared_audio_playlists
+    where id = p_playlist_id and calendar_id = p_calendar_id for update;
+  if not found then raise exception 'Playlist non trovata.'; end if;
+  select position into old_position from public.shared_audio_playlist_items
+    where playlist_id = p_playlist_id and object_path = p_object_path for update;
+  if not found then raise exception 'Brano non trovato nella playlist.'; end if;
+  select count(*) into item_count from public.shared_audio_playlist_items where playlist_id = p_playlist_id;
+  if p_new_position >= item_count then raise exception 'Posizione fuori dalla playlist.'; end if;
+  if p_new_position < old_position then
+    update public.shared_audio_playlist_items set position = position + 1
+      where playlist_id = p_playlist_id and position >= p_new_position and position < old_position;
+  elsif p_new_position > old_position then
+    update public.shared_audio_playlist_items set position = position - 1
+      where playlist_id = p_playlist_id and position > old_position and position <= p_new_position;
+  end if;
+  update public.shared_audio_playlist_items set position = p_new_position
+    where playlist_id = p_playlist_id and object_path = p_object_path;
+end;
+$$;
+
+create or replace function public.remove_shared_audio_playlist_item(
+  p_calendar_id uuid, p_playlist_id uuid, p_object_path text
+)
+returns void language plpgsql security definer set search_path = ''
+as $$
+declare old_position integer; active_playlist uuid; current_path text; next_path text;
+begin
+  if not public.is_current_user_calendar_member(p_calendar_id) then
+    raise exception 'Accesso allo spazio non autorizzato.';
+  end if;
+  perform 1 from public.shared_audio_playlists
+    where id = p_playlist_id and calendar_id = p_calendar_id for update;
+  if not found then raise exception 'Playlist non trovata.'; end if;
+  select position into old_position from public.shared_audio_playlist_items
+    where playlist_id = p_playlist_id and object_path = p_object_path for update;
+  if not found then return; end if;
+  select active_playlist_id into active_playlist from public.shared_audio_player_settings
+    where calendar_id = p_calendar_id;
+  select object_path into current_path from public.shared_playback where calendar_id = p_calendar_id;
+  delete from public.shared_audio_playlist_items
+    where playlist_id = p_playlist_id and object_path = p_object_path;
+  update public.shared_audio_playlist_items set position = position - 1
+    where playlist_id = p_playlist_id and position > old_position;
+  if active_playlist = p_playlist_id and current_path = p_object_path then
+    select object_path into next_path from public.shared_audio_playlist_items
+      where playlist_id = p_playlist_id and position >= old_position
+      order by position, added_at, object_path limit 1;
+    if next_path is null then
+      select object_path into next_path from public.shared_audio_playlist_items
+        where playlist_id = p_playlist_id order by position, added_at, object_path limit 1;
+    end if;
+    if next_path is null then
+      delete from public.shared_playback where calendar_id = p_calendar_id;
+    else
+      update public.shared_playback set object_path = next_path, position_seconds = 0,
+        playing = false, updated_at = clock_timestamp()
+      where calendar_id = p_calendar_id;
+    end if;
+  end if;
+end;
+$$;
+revoke all on function public.add_shared_audio_playlist_item(uuid, uuid, text) from public;
+revoke all on function public.move_shared_audio_playlist_item(uuid, uuid, text, integer) from public;
+revoke all on function public.remove_shared_audio_playlist_item(uuid, uuid, text) from public;
+grant execute on function public.add_shared_audio_playlist_item(uuid, uuid, text) to authenticated;
+grant execute on function public.move_shared_audio_playlist_item(uuid, uuid, text, integer) to authenticated;
+grant execute on function public.remove_shared_audio_playlist_item(uuid, uuid, text) to authenticated;
+
+create or replace function public.ensure_shared_audio_player()
+returns trigger language plpgsql security definer set search_path = ''
+as $$
+declare queue_id uuid;
+begin
+  insert into public.shared_audio_playlists (calendar_id, name, is_queue, created_by)
+  values (new.id, 'Coda condivisa', true, new.created_by)
+  on conflict (calendar_id) where is_queue do nothing
+  returning id into queue_id;
+  if queue_id is null then
+    select id into queue_id from public.shared_audio_playlists
+      where calendar_id = new.id and is_queue;
+  end if;
+  insert into public.shared_audio_player_settings (calendar_id, active_playlist_id)
+    values (new.id, queue_id) on conflict (calendar_id) do nothing;
+  return new;
+end;
+$$;
+revoke all on function public.ensure_shared_audio_player() from public;
+drop trigger if exists ensure_shared_audio_player on public.calendars;
+create trigger ensure_shared_audio_player after insert on public.calendars
+for each row execute function public.ensure_shared_audio_player();
+
+insert into public.shared_audio_playlists (calendar_id, name, is_queue, created_by)
+select calendar.id, 'Coda condivisa', true, calendar.created_by
+from public.calendars calendar
+where not exists (
+  select 1 from public.shared_audio_playlists playlist
+  where playlist.calendar_id = calendar.id and playlist.is_queue
+);
+insert into public.shared_audio_player_settings (calendar_id, active_playlist_id)
+select calendar.id, queue.id
+from public.calendars calendar
+join public.shared_audio_playlists queue on queue.calendar_id = calendar.id and queue.is_queue
+on conflict (calendar_id) do nothing;
+update public.shared_audio_player_settings settings
+set active_playlist_id = queue.id
+from public.shared_audio_playlists queue
+where queue.calendar_id = settings.calendar_id
+  and queue.is_queue
+  and not exists (
+    select 1 from public.shared_audio_playlists active
+    where active.id = settings.active_playlist_id
+      and active.calendar_id = settings.calendar_id
+  );
+
 create or replace function public.shared_stream_calendar_id(p_topic text)
 returns uuid language sql immutable set search_path = ''
 as $$
@@ -900,12 +1323,11 @@ create or replace function public.set_shared_playback(p_calendar_id uuid, p_obje
 returns void language plpgsql security definer set search_path = ''
 as $$
 begin
-  if not public.can_edit_calendar(p_calendar_id) then raise exception 'Solo gli editor possono controllare la riproduzione.'; end if;
+  if not public.is_current_user_calendar_member(p_calendar_id) then raise exception 'Accesso allo spazio non autorizzato.'; end if;
   if p_position is null or p_position < 0 or p_position > 604800
     or p_position::text in ('NaN', 'Infinity', '-Infinity') or p_playing is null
-    or public.shared_object_calendar_id(p_object_path) is distinct from p_calendar_id
-    or not exists (select 1 from storage.objects where bucket_id = 'family-shared' and name = p_object_path) then
-    raise exception 'File o posizione di riproduzione non validi.';
+    or not public.is_shared_audio(p_calendar_id, p_object_path) then
+    raise exception 'File audio o posizione di riproduzione non validi.';
   end if;
   insert into public.shared_playback (calendar_id, object_path, position_seconds, playing, updated_at)
   values (p_calendar_id, p_object_path, p_position, p_playing, clock_timestamp())
@@ -917,16 +1339,134 @@ create or replace function public.clear_shared_playback(p_calendar_id uuid, p_ob
 returns void language plpgsql security definer set search_path = ''
 as $$
 begin
-  if not public.can_edit_calendar(p_calendar_id) then raise exception 'Solo gli editor possono controllare la riproduzione.'; end if;
+  if not public.is_current_user_calendar_member(p_calendar_id) then raise exception 'Accesso allo spazio non autorizzato.'; end if;
   delete from public.shared_playback where calendar_id = p_calendar_id and object_path = p_object_path;
+end;
+$$;
+
+create or replace function public.advance_shared_playback(
+  p_calendar_id uuid, p_current_path text, p_direction integer
+)
+returns void language plpgsql security definer set search_path = ''
+as $$
+declare
+  active_playlist uuid;
+  shuffle_enabled boolean;
+  repeat_setting text;
+  current_position integer;
+  next_path text;
+begin
+  if not public.is_current_user_calendar_member(p_calendar_id) then
+    raise exception 'Accesso allo spazio non autorizzato.';
+  end if;
+  if p_direction is null or p_direction not in (-1, 1) then raise exception 'Direzione di riproduzione non valida.'; end if;
+  if not exists (
+    select 1 from public.shared_playback
+    where calendar_id = p_calendar_id and object_path = p_current_path
+  ) then return; end if;
+
+  select active_playlist_id, shuffle, repeat_mode into active_playlist, shuffle_enabled, repeat_setting
+  from public.shared_audio_player_settings where calendar_id = p_calendar_id for update;
+  if active_playlist is null then raise exception 'La playlist condivisa non è configurata.'; end if;
+
+  if repeat_setting = 'one' and p_direction = 1 then
+    update public.shared_playback set position_seconds = 0, playing = true, updated_at = clock_timestamp()
+    where calendar_id = p_calendar_id and object_path = p_current_path;
+    return;
+  end if;
+
+  select position into current_position
+  from public.shared_audio_playlist_items
+  where playlist_id = active_playlist and object_path = p_current_path;
+
+  if shuffle_enabled and p_direction = 1 then
+    select object_path into next_path
+    from public.shared_audio_playlist_items
+    where playlist_id = active_playlist and object_path <> p_current_path
+    order by random() limit 1;
+  elsif p_direction = 1 then
+    select object_path into next_path
+    from public.shared_audio_playlist_items
+    where playlist_id = active_playlist and position > coalesce(current_position, -1)
+    order by position, added_at, object_path limit 1;
+  else
+    select object_path into next_path
+    from public.shared_audio_playlist_items
+    where playlist_id = active_playlist and position < coalesce(current_position, 2147483647)
+    order by position desc, added_at desc, object_path desc limit 1;
+  end if;
+
+  if next_path is null and repeat_setting = 'all' then
+    if p_direction = 1 then
+      select object_path into next_path from public.shared_audio_playlist_items
+      where playlist_id = active_playlist order by position, added_at, object_path limit 1;
+    else
+      select object_path into next_path from public.shared_audio_playlist_items
+      where playlist_id = active_playlist order by position desc, added_at desc, object_path desc limit 1;
+    end if;
+  end if;
+
+  if next_path is null then
+    update public.shared_playback set position_seconds = 0, playing = false, updated_at = clock_timestamp()
+    where calendar_id = p_calendar_id;
+  else
+    update public.shared_playback set object_path = next_path, position_seconds = 0,
+      playing = true, updated_at = clock_timestamp()
+    where calendar_id = p_calendar_id;
+  end if;
+end;
+$$;
+
+create or replace function public.remove_shared_audio_path(p_calendar_id uuid, p_object_path text)
+returns void language plpgsql security definer set search_path = ''
+as $$
+declare
+  active_playlist uuid;
+  current_position integer;
+  next_path text;
+begin
+  if not public.can_edit_calendar(p_calendar_id)
+    or public.shared_object_calendar_id(p_object_path) is distinct from p_calendar_id then
+    raise exception 'Solo un editor può rimuovere file audio condivisi.';
+  end if;
+  select active_playlist_id into active_playlist
+  from public.shared_audio_player_settings where calendar_id = p_calendar_id for update;
+  select position into current_position from public.shared_audio_playlist_items
+  where playlist_id = active_playlist and object_path = p_object_path;
+  if exists (select 1 from public.shared_playback where calendar_id = p_calendar_id and object_path = p_object_path) then
+    select object_path into next_path from public.shared_audio_playlist_items
+    where playlist_id = active_playlist and object_path <> p_object_path
+      and position > coalesce(current_position, -1)
+    order by position, added_at, object_path limit 1;
+    if next_path is null then
+      select object_path into next_path from public.shared_audio_playlist_items
+      where playlist_id = active_playlist and object_path <> p_object_path
+      order by position, added_at, object_path limit 1;
+    end if;
+    if next_path is null then
+      delete from public.shared_playback where calendar_id = p_calendar_id and object_path = p_object_path;
+    else
+      update public.shared_playback set object_path = next_path, position_seconds = 0,
+        playing = false, updated_at = clock_timestamp()
+      where calendar_id = p_calendar_id and object_path = p_object_path;
+    end if;
+  end if;
+  delete from public.shared_audio_playlist_items item
+  using public.shared_audio_playlists playlist
+  where item.playlist_id = playlist.id and playlist.calendar_id = p_calendar_id
+    and item.object_path = p_object_path;
 end;
 $$;
 revoke all on function public.get_shared_playback(uuid) from public;
 revoke all on function public.set_shared_playback(uuid, text, double precision, boolean) from public;
 revoke all on function public.clear_shared_playback(uuid, text) from public;
+revoke all on function public.advance_shared_playback(uuid, text, integer) from public;
+revoke all on function public.remove_shared_audio_path(uuid, text) from public;
 grant execute on function public.get_shared_playback(uuid) to authenticated;
 grant execute on function public.set_shared_playback(uuid, text, double precision, boolean) to authenticated;
 grant execute on function public.clear_shared_playback(uuid, text) to authenticated;
+grant execute on function public.advance_shared_playback(uuid, text, integer) to authenticated;
+grant execute on function public.remove_shared_audio_path(uuid, text) to authenticated;
 
 alter table public.calendars add column if not exists edit_invite_code text
   not null default upper(replace(gen_random_uuid()::text, '-', ''));
@@ -1169,12 +1709,21 @@ alter table public.user_profiles
   add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
 alter table public.calendar_view_preferences
   add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.shared_audio_playlists
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.shared_audio_playlist_items
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.shared_audio_favorites
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.shared_audio_player_settings
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
 
 create table if not exists public.sync_tombstones (
   table_name text not null check (table_name in (
     'calendars', 'calendar_members', 'calendar_items', 'watch_sessions',
     'watch_participants', 'watch_items', 'watch_votes', 'shared_playback',
-    'user_profiles', 'calendar_view_preferences'
+    'user_profiles', 'calendar_view_preferences', 'shared_audio_playlists',
+    'shared_audio_playlist_items', 'shared_audio_favorites', 'shared_audio_player_settings'
   )),
   row_key jsonb not null,
   calendar_id uuid,
@@ -1187,7 +1736,8 @@ alter table public.sync_tombstones add constraint sync_tombstones_table_name_che
   check (table_name in (
     'calendars', 'calendar_members', 'calendar_items', 'watch_sessions',
     'watch_participants', 'watch_items', 'watch_votes', 'shared_playback',
-    'user_profiles', 'calendar_view_preferences'
+    'user_profiles', 'calendar_view_preferences', 'shared_audio_playlists',
+    'shared_audio_playlist_items', 'shared_audio_favorites', 'shared_audio_player_settings'
   ));
 
 alter table public.sync_tombstones enable row level security;
@@ -1231,18 +1781,23 @@ begin
     when 'shared_playback' then jsonb_build_object('calendar_id', old_row->'calendar_id')
     when 'user_profiles' then jsonb_build_object('user_id', old_row->'user_id')
     when 'calendar_view_preferences' then jsonb_build_object('calendar_id', old_row->'calendar_id', 'user_id', old_row->'user_id')
+    when 'shared_audio_playlists' then jsonb_build_object('id', old_row->'id')
+    when 'shared_audio_playlist_items' then jsonb_build_object('playlist_id', old_row->'playlist_id', 'object_path', old_row->'object_path')
+    when 'shared_audio_favorites' then jsonb_build_object('calendar_id', old_row->'calendar_id', 'user_id', old_row->'user_id', 'object_path', old_row->'object_path')
+    when 'shared_audio_player_settings' then jsonb_build_object('calendar_id', old_row->'calendar_id')
   end;
-  affected_calendar := coalesce(
-    nullif(old_row->>'calendar_id', '')::uuid,
-    case when tg_table_name = 'calendars' then nullif(old_row->>'id', '')::uuid end
-  );
+  affected_calendar := case when tg_table_name in ('calendar_view_preferences', 'shared_audio_favorites') then null
+    else coalesce(nullif(old_row->>'calendar_id', '')::uuid,
+      case when tg_table_name = 'calendars' then nullif(old_row->>'id', '')::uuid end)
+  end;
   if affected_calendar is null and tg_table_name in ('watch_votes') then
     select calendar_id into affected_calendar from public.watch_sessions
     where id = (old_row->>'session_id')::uuid;
   end if;
   affected_user := coalesce(
     nullif(old_row->>'user_id', '')::uuid,
-    nullif(old_row->>'created_by', '')::uuid
+    nullif(old_row->>'created_by', '')::uuid,
+    nullif(old_row->>'added_by', '')::uuid
   );
   insert into public.sync_tombstones (table_name, row_key, calendar_id, user_id, deleted_at)
   values (tg_table_name, row_key_value, affected_calendar, affected_user, clock_timestamp())
@@ -1261,7 +1816,8 @@ begin
   foreach table_name in array array[
     'calendars', 'calendar_members', 'calendar_items', 'watch_sessions',
     'watch_participants', 'watch_items', 'watch_votes', 'shared_playback',
-    'user_profiles', 'calendar_view_preferences'
+    'user_profiles', 'calendar_view_preferences', 'shared_audio_playlists',
+    'shared_audio_playlist_items', 'shared_audio_favorites', 'shared_audio_player_settings'
   ] loop
     execute format('drop trigger if exists touch_sync_updated_at on public.%I', table_name);
     execute format(

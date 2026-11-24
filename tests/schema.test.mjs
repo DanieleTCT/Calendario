@@ -9,12 +9,19 @@ const editor = '00000000-0000-4000-8000-000000000002'
 const viewer = '00000000-0000-4000-8000-000000000003'
 const outsider = '00000000-0000-4000-8000-000000000004'
 const calendar = '10000000-0000-4000-8000-000000000001'
+const otherCalendar = '10000000-0000-4000-8000-000000000002'
 const item = '20000000-0000-4000-8000-000000000001'
 const sharedItem = '20000000-0000-4000-8000-000000000002'
 const personalItem = '20000000-0000-4000-8000-000000000003'
 const session = '30000000-0000-4000-8000-000000000001'
 const choice = '40000000-0000-4000-8000-000000000001'
+const playlist = '50000000-0000-4000-8000-000000000001'
+const legacyQueue = '50000000-0000-4000-8000-000000000002'
+const secondLegacyQueue = '50000000-0000-4000-8000-000000000003'
 const file = `${calendar}/audio.mp3`
+const nextAudioFile = `${calendar}/second-track.ogg`
+const legacyAudioFile = `${calendar}/legacy-track.flac`
+const videoFile = `${calendar}/video.mp4`
 
 test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', async () => {
   const db = new PGlite({ extensions: { pgcrypto } })
@@ -31,7 +38,7 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
       grant execute on function auth.uid() to authenticated;
       create schema storage;
       create table storage.buckets (id text primary key, name text, public boolean, file_size_limit bigint);
-      create table storage.objects (id uuid default gen_random_uuid(), bucket_id text, name text);
+      create table storage.objects (id uuid default gen_random_uuid(), bucket_id text, name text, metadata jsonb);
       alter table storage.objects enable row level security;
       grant usage on schema storage to authenticated;
       grant select, insert, delete on storage.objects to authenticated;
@@ -107,7 +114,8 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     await db.query('update public.calendar_items set title = $1 where id = $2', ['Modificabile', item])
     await assert.rejects(() => db.query('update public.calendar_items set editable_by = array[$1::uuid] where id = $2', [viewer, item]))
     await as(owner)
-    await db.query('insert into storage.objects (bucket_id, name) values ($1, $2)', ['family-shared', file])
+    await db.query('insert into storage.objects (bucket_id, name) values ($1, $2), ($1, $3)', ['family-shared', file, nextAudioFile])
+    await db.query('insert into storage.objects (bucket_id, name, metadata) values ($1, $2, $3::jsonb)', ['family-shared', videoFile, JSON.stringify({ mimetype: 'video/mp4' })])
     await db.query('insert into public.watch_sessions (id, calendar_id, name, created_by) values ($1, $2, $3, $4)', [session, calendar, 'Serata', owner])
     await assert.rejects(() => db.query("insert into public.watch_sessions (calendar_id, name, created_by, status) values ($1, 'Bypass', $2, 'finished')", [calendar, owner]))
     await db.query('insert into public.watch_items (id, session_id, calendar_id, title, category, created_by) values ($1, $2, $3, $4, $5, $6)', [choice, session, calendar, 'Titolo', 'film', owner])
@@ -115,7 +123,7 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
 
     await as(viewer)
     assert.deepEqual((await rows('select id from public.calendar_items order by id')).map((row) => row.id), [sharedItem, personalItem])
-    assert.equal((await rows('select name from storage.objects')).length, 1)
+    assert.equal((await rows('select name from storage.objects')).length, 3)
     assert.equal((await rows('select user_id from public.calendar_view_preferences')).length, 0)
     await db.query(`insert into public.calendar_view_preferences (calendar_id, user_id, hidden_item_ids)
       values ($1, $2, array[$3::uuid])`, [calendar, viewer, sharedItem])
@@ -127,12 +135,29 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     await db.query('select public.join_calendar_with_code($1)', [editCode])
     assert.equal((await rows('select can_edit from public.calendar_members where user_id = $1', [viewer]))[0].can_edit, false)
     await assert.rejects(() => db.query('insert into public.watch_items (session_id, calendar_id, title, category, created_by) values ($1, $2, $3, $4, $5)', [session, calendar, 'No', 'film', viewer]))
+    const queue = (await rows('select id from public.shared_audio_playlists where calendar_id = $1 and is_queue', [calendar]))[0]
+    assert.ok(queue)
+    await db.query('select public.add_shared_audio_playlist_item($1, $2, $3)', [calendar, queue.id, file])
+    await db.query('select public.add_shared_audio_playlist_item($1, $2, $3)', [calendar, queue.id, nextAudioFile])
+    await assert.rejects(() => db.query('select public.add_shared_audio_playlist_item($1, $2, $3)', [calendar, queue.id, videoFile]))
+    await db.query('insert into public.shared_audio_playlists (id, calendar_id, name, created_by) values ($1, $2, $3, $4)', [playlist, calendar, 'Preferiti di famiglia', viewer])
+    await db.query('select public.add_shared_audio_playlist_item($1, $2, $3)', [calendar, playlist, file])
+    await db.query('insert into public.shared_audio_favorites (calendar_id, user_id, object_path) values ($1, $2, $3)', [calendar, viewer, file])
+    await db.query('update public.shared_audio_player_settings set shuffle = true, repeat_mode = $1 where calendar_id = $2', ['one', calendar])
+    await db.query('select public.set_shared_playback($1, $2, 0, true)', [calendar, file])
+    await db.query('select public.advance_shared_playback($1, $2, 1)', [calendar, file])
+    assert.equal((await rows('select object_path, position_seconds, playing from public.get_shared_playback($1)', [calendar]))[0].object_path, file)
+    assert.equal((await rows('select user_id from public.shared_audio_favorites where calendar_id = $1', [calendar])).length, 1)
     await db.query("update public.calendar_members set allow_style_editors = false where calendar_id = $1 and user_id = $2", [calendar, viewer])
     await as(editor)
     assert.equal((await rows("update public.calendar_members set style_border = 'dashed' where calendar_id = $1 and user_id = $2 returning user_id", [calendar, viewer])).length, 0)
     await as(viewer)
     await assert.rejects(() => db.query('insert into storage.objects (bucket_id, name) values ($1, $2)', ['family-shared', `${calendar}/vietato`]))
-    await assert.rejects(() => db.query('select public.set_shared_playback($1, $2, 0, true)', [calendar, file]))
+    await db.query('select public.set_shared_playback($1, $2, 0, true)', [calendar, nextAudioFile])
+    assert.equal((await rows('select user_id from public.shared_audio_favorites where calendar_id = $1', [calendar])).length, 1)
+    await as(owner)
+    assert.equal((await rows('select user_id from public.shared_audio_favorites where calendar_id = $1', [calendar])).length, 0)
+    await as(viewer)
     await db.query('insert into public.watch_participants (session_id, calendar_id, user_id) values ($1, $2, $3)', [session, calendar, viewer])
     await assert.rejects(() => db.query('insert into public.watch_votes (session_id, item_id, user_id, liked, rating) values ($1, $2, $3, true, 4)', [session, choice, viewer]))
     await as(editor)
@@ -153,7 +178,27 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     await assert.rejects(() => db.query('update public.watch_votes set rating = 3 where user_id = $1', [editor]))
     await assert.rejects(() => db.query('delete from public.watch_participants where user_id = $1', [editor]))
     await db.exec('reset role')
+    await db.query("select set_config('request.jwt.claim.sub', $1, false)", [owner])
+    await db.exec('drop index public.shared_audio_one_queue_per_calendar_idx')
+    await db.query('insert into public.shared_audio_playlists (id, calendar_id, name, is_queue, created_by) values ($1, $2, $3, true, $4)', [legacyQueue, calendar, 'Coda condivisa', owner])
+    await db.query('insert into storage.objects (bucket_id, name) values ($1, $2)', ['family-shared', legacyAudioFile])
+    await db.query('insert into public.shared_audio_playlist_items (playlist_id, calendar_id, object_path, position, added_by) values ($1, $2, $3, 0, $4)', [legacyQueue, calendar, legacyAudioFile, owner])
+    await db.query('update public.shared_audio_player_settings set active_playlist_id = $1 where calendar_id = $2', [legacyQueue, calendar])
     await db.exec(schema)
+    assert.deepEqual((await rows('select id from public.shared_audio_playlists where calendar_id = $1 and is_queue', [calendar])).map((row) => row.id), [legacyQueue])
+    assert.equal((await rows('select object_path from public.shared_audio_playlist_items where playlist_id = $1', [legacyQueue])).length, 3)
+    assert.equal((await rows('select active_playlist_id from public.shared_audio_player_settings where calendar_id = $1', [calendar]))[0].active_playlist_id, legacyQueue)
+    await db.query('insert into public.calendars (id, name, created_by) values ($1, $2, $3)', [otherCalendar, 'Secondo spazio', owner])
+    const otherQueue = (await rows('select id from public.shared_audio_playlists where calendar_id = $1 and is_queue', [otherCalendar]))[0].id
+    await db.exec('drop index public.shared_audio_one_queue_per_calendar_idx')
+    await db.query('insert into public.shared_audio_playlists (id, calendar_id, name, is_queue, created_by) values ($1, $2, $3, true, $4)', [secondLegacyQueue, calendar, 'Coda condivisa', owner])
+    await db.query('update public.shared_audio_player_settings set active_playlist_id = $1 where calendar_id = $2', [playlist, calendar])
+    await db.exec('alter table public.shared_audio_player_settings disable trigger check_shared_audio_player_settings')
+    await db.query('update public.shared_audio_player_settings set active_playlist_id = $1 where calendar_id = $2', [legacyQueue, otherCalendar])
+    await db.exec('alter table public.shared_audio_player_settings enable trigger check_shared_audio_player_settings')
+    await db.exec(schema)
+    assert.equal((await rows('select active_playlist_id from public.shared_audio_player_settings where calendar_id = $1', [calendar]))[0].active_playlist_id, playlist)
+    assert.equal((await rows('select active_playlist_id from public.shared_audio_player_settings where calendar_id = $1', [otherCalendar]))[0].active_playlist_id, otherQueue)
     await as(editor)
     assert.equal((await rows('select status from public.watch_sessions where id = $1', [session]))[0].status, 'finished')
     assert.equal((await rows('select * from public.watch_votes')).length, 2)
@@ -277,7 +322,7 @@ test('profili Mii leggibili solo ai membri dei calendari condivisi e modificabil
       grant execute on function auth.uid() to authenticated;
       create schema storage;
       create table storage.buckets (id text primary key, name text, public boolean, file_size_limit bigint);
-      create table storage.objects (id uuid default gen_random_uuid(), bucket_id text, name text);
+      create table storage.objects (id uuid default gen_random_uuid(), bucket_id text, name text, metadata jsonb);
       alter table storage.objects enable row level security;
       grant usage on schema storage to authenticated;
       grant select, insert, delete on storage.objects to authenticated;

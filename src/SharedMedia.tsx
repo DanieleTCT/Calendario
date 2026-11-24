@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
 import type { RealtimeChannel } from '@supabase/supabase-js'
-import { FolderOpen, Mic, MicOff, Phone, PhoneOff, PlayCircle, Radio, UsersRound, Video, VideoOff, Volume2, VolumeX } from 'lucide-react'
+import { Heart, Mic, MicOff, Music2, Pause, Phone, PhoneOff, Play, PlayCircle, Radio, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Trash2, UsersRound, Video, VideoOff, Volume2, VolumeX } from 'lucide-react'
 import * as tus from 'tus-js-client'
 import { supabase } from './lib/supabase'
 
-type SharedFile = { name: string; metadata: { size?: number } | null }
+type SharedFile = { name: string; metadata: Record<string, unknown> | null }
 type Playback = { object_path: string; position_seconds: number; playing: boolean; updated_at: string; server_now: string }
 type LiveStream = { peerId: string; title: string }
+type AudioPlaylist = { id: string; calendar_id: string; name: string; is_queue: boolean; created_by: string }
+type AudioPlaylistItem = { playlist_id: string; calendar_id: string; object_path: string; position: number; added_by: string; added_at: string }
+type AudioPlayerSettings = { calendar_id: string; active_playlist_id: string; shuffle: boolean; repeat_mode: 'off' | 'all' | 'one' }
 type StreamSignal = {
   type: 'discover' | 'start' | 'stop' | 'join' | 'leave' | 'offer' | 'answer' | 'ice'
   from: string
@@ -34,6 +38,7 @@ type CallPeer = {
   stream: MediaStream | null
 }
 type NetworkPriority = 'movie' | 'balanced' | 'call'
+type DocumentPipApi = { requestWindow: (options?: { width?: number; height?: number }) => Promise<Window> }
 
 const bucket = 'family-shared'
 const resumableUploadThreshold = 6 * 1024 * 1024
@@ -44,8 +49,7 @@ const bitrateProfiles: Record<NetworkPriority, { call: number; movie: number }> 
   call: { call: 1_200_000, movie: 400_000 },
 }
 const mediaTabs = [
-  { id: 'files', label: 'File dello spazio', icon: FolderOpen },
-  { id: 'playback', label: 'Riproduzione', icon: PlayCircle },
+  { id: 'files', label: 'Audio player', icon: PlayCircle },
   { id: 'live', label: 'Diretta', icon: Radio },
   { id: 'call', label: 'Chiamata', icon: Phone },
 ] as const
@@ -55,19 +59,40 @@ function displayName(name: string) {
   return name.replace(/^[0-9a-f-]{36}_/i, '')
 }
 
+function isAudioFile(file: SharedFile) {
+  const mimeType = file.metadata?.mimetype ?? file.metadata?.contentType
+  return (typeof mimeType === 'string' && mimeType.toLocaleLowerCase().startsWith('audio/'))
+    || /\.(mp3|m4a|aac|wav|ogg|opus|flac|wma|aiff)$/i.test(file.name)
+}
+
+function formatTime(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00'
+  return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`
+}
+
 function positionAt(playback: Playback, receivedAt: number) {
   return Math.max(0, playback.position_seconds + (playback.playing
     ? (Date.parse(playback.server_now) - Date.parse(playback.updated_at) + Date.now() - receivedAt) / 1000
     : 0))
 }
 
-export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: string; canEdit: boolean; memberName: string }) {
+export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calendarId: string; canEdit: boolean; memberName: string; userId: string }) {
   const [activeTab, setActiveTab] = useState<MediaTab>('files')
   const tabsId = useId()
   const [files, setFiles] = useState<SharedFile[]>([])
+  const [filesLoaded, setFilesLoaded] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [uploadProgress, setUploadProgress] = useState<number | null>(null)
   const [playback, setPlayback] = useState<Playback | null>(null)
+  const [playlists, setPlaylists] = useState<AudioPlaylist[]>([])
+  const [playlistItems, setPlaylistItems] = useState<AudioPlaylistItem[]>([])
+  const [favorites, setFavorites] = useState<string[]>([])
+  const [playerSettings, setPlayerSettings] = useState<AudioPlayerSettings | null>(null)
+  const [playlistName, setPlaylistName] = useState('')
+  const [libraryQuery, setLibraryQuery] = useState('')
+  const [audioTime, setAudioTime] = useState(0)
+  const [audioDuration, setAudioDuration] = useState(0)
+  const [volume, setVolume] = useState(0.8)
   const [joined, setJoined] = useState(false)
   const [mediaUrl, setMediaUrl] = useState('')
   const [streamFile, setStreamFile] = useState<File | null>(null)
@@ -83,20 +108,22 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
   const [cameraEnabled, setCameraEnabled] = useState(true)
   const [speakerEnabled, setSpeakerEnabled] = useState(true)
   const [networkPriority, setNetworkPriority] = useState<NetworkPriority>('balanced')
-  const [seek, setSeek] = useState('0')
+  const [pipSupported, setPipSupported] = useState(false)
+  const [pipWindow, setPipWindow] = useState<Window | null>(null)
+  const [pipTarget, setPipTarget] = useState<HTMLElement | null>(null)
+  const [pipFallback, setPipFallback] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [channelReady, setChannelReady] = useState(false)
-  const mediaRef = useRef<HTMLVideoElement>(null)
+  const mediaRef = useRef<HTMLAudioElement>(null)
   const hostMediaRef = useRef<HTMLVideoElement>(null)
   const remoteMediaRef = useRef<HTMLVideoElement>(null)
-  const localCallMediaRef = useRef<HTMLVideoElement>(null)
-  const remoteCallMediaRefs = useRef(new Map<string, HTMLVideoElement>())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const roomRef = useRef<{ state: Playback; receivedAt: number } | null>(null)
   const signedRef = useRef<{ path: string; expiresAt: number } | null>(null)
   const requestRef = useRef(0)
+  const playerDataRequestRef = useRef(0)
   const peerIdRef = useRef(crypto.randomUUID())
   const channelRef = useRef<RealtimeChannel | null>(null)
   const streamUrlRef = useRef('')
@@ -113,6 +140,7 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
   const callConnectionsRef = useRef(new Map<string, RTCPeerConnection>())
   const pendingCallCandidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>())
   const callPeersRef = useRef<CallPeer[]>([])
+  const pipWindowRef = useRef<Window | null>(null)
   callNameRef.current = memberName
   networkPriorityRef.current = networkPriority
 
@@ -242,6 +270,64 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
     return connection
   }, [closeCallConnection, removeCallPeer, sendCallSignal, updateCallPeer])
 
+  const closeCallPictureInPicture = useCallback(() => {
+    const pip = pipWindowRef.current
+    pipWindowRef.current = null
+    if (pip && !pip.closed) pip.close()
+    setPipWindow(null)
+    setPipTarget(null)
+    setPipFallback(false)
+  }, [])
+
+  const toggleCallPictureInPicture = async () => {
+    if (pipWindowRef.current || pipFallback) {
+      closeCallPictureInPicture()
+      return
+    }
+    const api = (window as Window & { documentPictureInPicture?: DocumentPipApi }).documentPictureInPicture
+    if (!api) {
+      setPipFallback(true)
+      setActiveTab('live')
+      setNotice('PiP del browser non disponibile: la chiamata è in una finestra flottante sulla pagina.')
+      return
+    }
+    try {
+      const pip = await api.requestWindow({ width: 360, height: 480 })
+      pip.document.title = 'Chiamata — Family'
+      pip.document.body.style.margin = '0'
+      pip.document.body.style.background = '#f7f8fc'
+      for (const stylesheet of document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')) {
+        const link = pip.document.createElement('link')
+        link.rel = 'stylesheet'
+        link.href = stylesheet.href
+        pip.document.head.append(link)
+      }
+      for (const stylesheet of document.querySelectorAll<HTMLStyleElement>('style')) {
+        const style = pip.document.createElement('style')
+        style.textContent = stylesheet.textContent
+        pip.document.head.append(style)
+      }
+      const target = pip.document.createElement('div')
+      target.className = 'media-call-pip-root'
+      pip.document.body.append(target)
+      pipWindowRef.current = pip
+      setPipWindow(pip)
+      setPipTarget(target)
+      setPipFallback(false)
+      pip.addEventListener('pagehide', () => {
+        if (pipWindowRef.current !== pip) return
+        pipWindowRef.current = null
+        setPipWindow(null)
+        setPipTarget(null)
+      }, { once: true })
+      setActiveTab('live')
+    } catch (pipError) {
+      setNotice(`PiP nativo non disponibile: ${pipError instanceof Error ? pipError.message : 'uso la finestra nella pagina'}`)
+      setPipFallback(true)
+      setActiveTab('live')
+    }
+  }
+
   const stopCall = useCallback(() => {
     if (callActiveRef.current) {
       void sendCallSignal({ type: 'leave', from: peerIdRef.current })
@@ -258,7 +344,8 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
     for (const peerId of callConnectionsRef.current.keys()) closeCallConnection(peerId)
     callPeersRef.current = []
     setCallPeers([])
-  }, [closeCallConnection, sendCallSignal])
+    closeCallPictureInPicture()
+  }, [closeCallConnection, closeCallPictureInPicture, sendCallSignal])
 
   const handleCallSignal = useCallback(async (payload: unknown) => {
     if (!payload || typeof payload !== 'object') return
@@ -506,6 +593,9 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
       callActiveRef.current = false
       localCallStreamRef.current?.getTracks().forEach((track) => track.stop())
       localCallStreamRef.current = null
+      const pip = pipWindowRef.current
+      pipWindowRef.current = null
+      if (pip && !pip.closed) pip.close()
       for (const peerId of callConnectionsRef.current.keys()) closeCallConnection(peerId)
       callPeersRef.current = []
       channelRef.current = null
@@ -524,17 +614,12 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
   }, [remoteStream])
 
   useEffect(() => {
-    if (localCallMediaRef.current) localCallMediaRef.current.srcObject = localCallStream
-  }, [localCallStream])
+    if (mediaRef.current) mediaRef.current.volume = volume
+  }, [volume])
 
   useEffect(() => {
-    for (const peer of callPeers) {
-      const element = remoteCallMediaRefs.current.get(peer.peerId)
-      if (!element || !peer.stream) continue
-      element.srcObject = peer.stream
-      void element.play().catch(() => setNotice('Tocca il video del partecipante per attivare l’audio della chiamata.'))
-    }
-  }, [callPeers])
+    setPipSupported(Boolean((window as Window & { documentPictureInPicture?: DocumentPipApi }).documentPictureInPicture))
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -634,6 +719,7 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
       offset += page.length
     }
     setFiles(all)
+    setFilesLoaded(true)
   }, [calendarId])
 
   const applyPlayback = useCallback(() => {
@@ -644,12 +730,13 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
     const duration = Number.isFinite(element.duration) ? element.duration : Infinity
     const bounded = Math.min(target, duration)
     if (Math.abs(element.currentTime - bounded) > 1.5) element.currentTime = bounded
+    setAudioTime(bounded)
     if (room.state.playing && target < duration) {
       if (element.paused) void element.play().catch(() => setNotice('Il browser ha bloccato la riproduzione automatica: premi “Attiva riproduzione” sul dispositivo.'))
     } else if (!element.paused) element.pause()
   }, [])
 
-  const loadPlayback = useCallback(async () => {
+  const loadPlayback = useCallback(async (forceJoin = false) => {
     if (!supabase) return
     const request = ++requestRef.current
     const start = Date.now()
@@ -665,21 +752,78 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
       setMediaUrl('')
       return
     }
-    if (joined && (signedRef.current?.path !== state.object_path || signedRef.current.expiresAt < Date.now())) {
+    const objectName = state.object_path.split('/').pop() ?? ''
+    const file = files.find((entry) => `${calendarId}/${entry.name}` === state.object_path)
+    if ((file && !isAudioFile(file)) || (filesLoaded && !file && !isAudioFile({ name: objectName, metadata: null }))) {
+      setMediaUrl('')
+      setNotice('La riproduzione condivisa è un video o un file non audio: usa la sezione Diretta.')
+      return
+    }
+    const shouldJoin = joined || forceJoin
+    if (shouldJoin && (signedRef.current?.path !== state.object_path || signedRef.current.expiresAt < Date.now())) {
       const { data: signed, error: urlError } = await supabase.storage.from(bucket).createSignedUrl(state.object_path, 3600)
       if (request !== requestRef.current) return
       if (urlError || !signed) { setError(`Impossibile aprire il file condiviso: ${urlError?.message ?? 'URL non disponibile'}`); return }
       signedRef.current = { path: state.object_path, expiresAt: Date.now() + 50 * 60 * 1000 }
       setMediaUrl(signed.signedUrl)
-    } else if (joined) applyPlayback()
-  }, [calendarId, joined, applyPlayback])
+    } else if (shouldJoin) applyPlayback()
+  }, [calendarId, files, filesLoaded, joined, applyPlayback])
+
+  const loadPlayerData = useCallback(async () => {
+    if (!supabase) return
+    const request = ++playerDataRequestRef.current
+    const [playlistResult, settingsResult, favoritesResult] = await Promise.all([
+      supabase.from('shared_audio_playlists').select('id, calendar_id, name, is_queue, created_by').eq('calendar_id', calendarId).order('is_queue', { ascending: false }).order('name'),
+      supabase.from('shared_audio_player_settings').select('calendar_id, active_playlist_id, shuffle, repeat_mode').eq('calendar_id', calendarId),
+      supabase.from('shared_audio_favorites').select('object_path').eq('calendar_id', calendarId).eq('user_id', userId),
+    ])
+    if (request !== playerDataRequestRef.current) return
+    if (playlistResult.error) { setError(`Impossibile caricare le playlist: ${playlistResult.error.message}`); return }
+    if (settingsResult.error) { setError(`Impossibile caricare le impostazioni del player: ${settingsResult.error.message}`); return }
+    if (favoritesResult.error) { setError(`Impossibile caricare i preferiti: ${favoritesResult.error.message}`); return }
+
+    const loadedPlaylists = (playlistResult.data ?? []) as AudioPlaylist[]
+    const queue = loadedPlaylists.find((playlist) => playlist.is_queue)
+    if (!queue) {
+      setError('La coda audio condivisa non è configurata. Applica lo schema Supabase aggiornato.')
+      return
+    }
+    const state = ((settingsResult.data ?? [])[0] as AudioPlayerSettings | undefined) ?? {
+      calendar_id: calendarId,
+      active_playlist_id: queue.id,
+      shuffle: false,
+      repeat_mode: 'off' as const,
+    }
+    const activePlaylist = loadedPlaylists.some((playlist) => playlist.id === state.active_playlist_id)
+      ? state.active_playlist_id
+      : queue.id
+    const { data: trackRows, error: tracksError } = await supabase
+      .from('shared_audio_playlist_items')
+      .select('playlist_id, calendar_id, object_path, position, added_by, added_at')
+      .eq('playlist_id', activePlaylist)
+      .order('position')
+      .order('added_at')
+    if (request !== playerDataRequestRef.current) return
+    if (tracksError) { setError(`Impossibile caricare la coda audio: ${tracksError.message}`); return }
+    setPlaylists(loadedPlaylists)
+    setPlayerSettings({ ...state, active_playlist_id: activePlaylist })
+    setPlaylistItems((trackRows ?? []) as AudioPlaylistItem[])
+    setFavorites((favoritesResult.data ?? []).map((favorite) => favorite.object_path as string))
+  }, [calendarId, userId])
 
   useEffect(() => {
     void loadFiles()
     void loadPlayback()
-    const timer = window.setInterval(() => { void loadPlayback() }, 3000)
-    return () => { ++requestRef.current; window.clearInterval(timer) }
-  }, [loadFiles, loadPlayback])
+    void loadPlayerData()
+    const playbackTimer = window.setInterval(() => { void loadPlayback() }, 3000)
+    const playerDataTimer = window.setInterval(() => { void loadPlayerData() }, 5000)
+    return () => {
+      ++requestRef.current
+      ++playerDataRequestRef.current
+      window.clearInterval(playbackTimer)
+      window.clearInterval(playerDataTimer)
+    }
+  }, [loadFiles, loadPlayback, loadPlayerData])
 
   const upload = async (event: FormEvent) => {
     event.preventDefault()
@@ -868,23 +1012,191 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
     if (deleteError) setError(`Impossibile eliminare il file: ${deleteError.message}`)
     else if (!removed?.length) setError('File non eliminato: potrebbe non essere più disponibile o modificabile.')
     else {
-      const { error: clearError } = await supabase.rpc('clear_shared_playback', { p_calendar_id: calendarId, p_object_path: path })
-      if (clearError) setError(`File eliminato, ma impossibile aggiornare la riproduzione: ${clearError.message}`)
-      await Promise.all([loadFiles(), loadPlayback()])
+      const { error: cleanupError } = await supabase.rpc('remove_shared_audio_path', { p_calendar_id: calendarId, p_object_path: path })
+      if (cleanupError) setError(`File eliminato, ma impossibile aggiornare playlist e player: ${cleanupError.message}`)
+      await Promise.all([loadFiles(), loadPlayerData(), loadPlayback()])
     }
     setBusy(false)
   }
 
-  const control = async (path: string, position: number, playing: boolean) => {
+  const control = async (path: string, position: number, playing: boolean, joinPlayer = false) => {
     if (!supabase) return
     setBusy(true); setError('')
     const { error: controlError } = await supabase.rpc('set_shared_playback', {
       p_calendar_id: calendarId, p_object_path: path, p_position: position, p_playing: playing,
     })
     if (controlError) setError(`Impossibile controllare la riproduzione: ${controlError.message}`)
-    else await loadPlayback()
+    else await loadPlayback(joinPlayer)
     setBusy(false)
   }
+
+  const updatePlayerSettings = async (change: Partial<AudioPlayerSettings>) => {
+    if (!supabase || !playerSettings) return
+    const next = { ...playerSettings, ...change }
+    setPlayerSettings(next)
+    const { error: settingsError } = await supabase
+      .from('shared_audio_player_settings')
+      .update({ active_playlist_id: next.active_playlist_id, shuffle: next.shuffle, repeat_mode: next.repeat_mode })
+      .eq('calendar_id', calendarId)
+    if (settingsError) {
+      setError(`Impossibile aggiornare il player condiviso: ${settingsError.message}`)
+      await loadPlayerData()
+    }
+  }
+
+  const addAudioToPlaylist = async (file: SharedFile, playlistId = playerSettings?.active_playlist_id) => {
+    if (!supabase || !playlistId) return
+    const path = `${calendarId}/${file.name}`
+    const { error: addError } = await supabase.rpc('add_shared_audio_playlist_item', {
+      p_calendar_id: calendarId,
+      p_playlist_id: playlistId,
+      p_object_path: path,
+    })
+    if (addError) {
+      setError(`Impossibile aggiungere il brano alla playlist: ${addError.message}`)
+      return
+    }
+    await loadPlayerData()
+  }
+
+  const playAudioFile = async (file: SharedFile) => {
+    if (!supabase || !playerSettings) {
+      setError('La playlist condivisa non è pronta.')
+      return
+    }
+    const path = `${calendarId}/${file.name}`
+    if (!playlistItems.some((item) => item.object_path === path)) {
+      const { error: addError } = await supabase.rpc('add_shared_audio_playlist_item', {
+        p_calendar_id: calendarId,
+        p_playlist_id: playerSettings.active_playlist_id,
+        p_object_path: path,
+      })
+      if (addError) {
+        setError(`Impossibile aggiungere il brano alla coda: ${addError.message}`)
+        return
+      }
+      await loadPlayerData()
+    }
+    setJoined(true)
+    await control(path, 0, true, true)
+  }
+
+  const skipTrack = async (direction: -1 | 1) => {
+    if (!supabase || !playback) return
+    const element = mediaRef.current
+    if (direction === -1 && element && element.currentTime > 3) {
+      await control(playback.object_path, 0, true, true)
+      return
+    }
+    const { error: advanceError } = await supabase.rpc('advance_shared_playback', {
+      p_calendar_id: calendarId,
+      p_current_path: playback.object_path,
+      p_direction: direction,
+    })
+    if (advanceError) setError(`Impossibile cambiare brano: ${advanceError.message}`)
+    else {
+      setJoined(true)
+      await loadPlayback(true)
+    }
+  }
+
+  const toggleFavorite = async (file: SharedFile) => {
+    if (!supabase) return
+    const path = `${calendarId}/${file.name}`
+    const isFavorite = favorites.includes(path)
+    const { error: favoriteError } = isFavorite
+      ? await supabase.from('shared_audio_favorites').delete().eq('calendar_id', calendarId).eq('user_id', userId).eq('object_path', path)
+      : await supabase.from('shared_audio_favorites').insert({ calendar_id: calendarId, user_id: userId, object_path: path })
+    if (favoriteError) setError(`Impossibile aggiornare i preferiti: ${favoriteError.message}`)
+    else await loadPlayerData()
+  }
+
+  const createPlaylist = async (event: FormEvent) => {
+    event.preventDefault()
+    const name = playlistName.trim()
+    if (!supabase || !name) return
+    const id = crypto.randomUUID()
+    const { error: createError } = await supabase.from('shared_audio_playlists').insert({
+      id, calendar_id: calendarId, name, is_queue: false, created_by: userId,
+    })
+    if (createError) {
+      setError(`Impossibile creare la playlist: ${createError.message}`)
+      return
+    }
+    setPlaylistName('')
+    await loadPlayerData()
+  }
+
+  const selectPlaylist = async (playlistId: string) => {
+    if (!supabase) return
+    await updatePlayerSettings({ active_playlist_id: playlistId })
+    const { data: tracks, error: tracksError } = await supabase
+      .from('shared_audio_playlist_items')
+      .select('object_path, position')
+      .eq('playlist_id', playlistId)
+      .order('position')
+    if (tracksError) {
+      setError(`Impossibile aprire la playlist: ${tracksError.message}`)
+      return
+    }
+    const paths = (tracks ?? []).map((track) => track.object_path as string)
+    if (playback && !paths.includes(playback.object_path)) {
+      if (paths.length) await control(paths[0], 0, playback.playing, joined)
+      else {
+        const { error: clearError } = await supabase.rpc('clear_shared_playback', {
+          p_calendar_id: calendarId, p_object_path: playback.object_path,
+        })
+        if (clearError) setError(`Impossibile svuotare il player: ${clearError.message}`)
+        else await loadPlayback()
+      }
+    }
+    await loadPlayerData()
+  }
+
+  const deletePlaylist = async (playlist: AudioPlaylist) => {
+    if (!supabase || playlist.is_queue) return
+    const queue = playlists.find((entry) => entry.is_queue)
+    if (!queue || !window.confirm(`Eliminare la playlist “${playlist.name}” per tutti i membri?`)) return
+    if (playerSettings?.active_playlist_id === playlist.id) await selectPlaylist(queue.id)
+    const { error: deleteError } = await supabase.from('shared_audio_playlists').delete().eq('id', playlist.id)
+    if (deleteError) setError(`Impossibile eliminare la playlist: ${deleteError.message}`)
+    else await loadPlayerData()
+  }
+
+  const removePlaylistItem = async (item: AudioPlaylistItem) => {
+    if (!supabase) return
+    const { error: removeError } = await supabase.rpc('remove_shared_audio_playlist_item', {
+      p_calendar_id: calendarId, p_playlist_id: item.playlist_id, p_object_path: item.object_path,
+    })
+    if (removeError) setError(`Impossibile rimuovere il brano: ${removeError.message}`)
+    else {
+      await Promise.all([loadPlayerData(), loadPlayback(joined)])
+    }
+  }
+
+  const movePlaylistItem = async (item: AudioPlaylistItem, delta: -1 | 1) => {
+    if (!supabase) return
+    const index = playlistItems.findIndex((entry) => entry.object_path === item.object_path)
+    const nextPosition = index + delta
+    if (index < 0 || nextPosition < 0 || nextPosition >= playlistItems.length) return
+    const { error: moveError } = await supabase.rpc('move_shared_audio_playlist_item', {
+      p_calendar_id: calendarId,
+      p_playlist_id: item.playlist_id,
+      p_object_path: item.object_path,
+      p_new_position: nextPosition,
+    })
+    if (moveError) setError(`Impossibile riordinare la playlist: ${moveError.message}`)
+    else await loadPlayerData()
+  }
+
+  const audioFiles = files.filter(isAudioFile)
+  const otherFiles = files.filter((file) => !isAudioFile(file))
+  const activePlaylist = playlists.find((playlist) => playlist.id === playerSettings?.active_playlist_id)
+  const visibleAudioFiles = audioFiles.filter((file) => {
+    const query = libraryQuery.trim().toLocaleLowerCase('it-IT')
+    return !query || displayName(file.name).toLocaleLowerCase('it-IT').includes(query)
+  })
+  const currentFileName = playback?.object_path.split('/').pop() ?? ''
 
   const navigateTabs = (event: KeyboardEvent<HTMLDivElement>) => {
     const index = mediaTabs.findIndex((tab) => tab.id === activeTab)
@@ -902,10 +1214,10 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
   }
 
   return <section className="feature-page">
-    <header className="feature-hero"><span className="feature-kicker">IL VOSTRO SPAZIO</span><h2>File e riproduzione condivisa</h2><p>Un posto per i vostri file, musica e video.</p></header>
+    <header className="feature-hero"><span className="feature-kicker">IL VOSTRO SPAZIO</span><h2>Audio player condiviso</h2><p>Una libreria audio e una playlist sincronizzata per il gruppo.</p></header>
     {error && <p className="form-message form-error" role="alert">{error}</p>}
     {notice && <p className="form-message form-notice" role="status">{notice}</p>}
-    <div className="media-tabs" role="tablist" aria-label="File e riproduzione" onKeyDown={navigateTabs}>
+    <div className="media-tabs" role="tablist" aria-label="Player audio, diretta e chiamata" onKeyDown={navigateTabs}>
       {mediaTabs.map(({ id, label, icon: Icon }) => <button
         key={id}
         type="button"
@@ -916,22 +1228,129 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
         tabIndex={activeTab === id ? 0 : -1}
         className={activeTab === id ? 'media-tab-active' : ''}
         onClick={() => setActiveTab(id)}
-      ><Icon size={17} aria-hidden="true" />{label}{id === 'files' && <span className="count-pill">{files.length}</span>}{id === 'live' && streamHost && <span className="media-live-indicator">Live</span>}{id === 'call' && inCall && <span className="media-live-indicator">In chiamata</span>}</button>)}
+      ><Icon size={17} aria-hidden="true" />{label}{id === 'files' && <span className="count-pill">{audioFiles.length}</span>}{id === 'live' && streamHost && <span className="media-live-indicator">Live</span>}{id === 'call' && inCall && <span className="media-live-indicator">In chiamata</span>}</button>)}
     </div>
     <section id={`${tabsId}-panel-files`} role="tabpanel" aria-labelledby={`${tabsId}-tab-files`} tabIndex={0} hidden={activeTab !== 'files'}>
-      <div className="feature-card">
-        <h3>File dello spazio <span className="count-pill">{files.length}</span></h3>
-        <p>I file sono visibili a tutti i membri dello spazio. Gli editor possono caricarli, eliminarli e selezionarli per la riproduzione. I caricamenti cloud restano soggetti al limite del progetto Supabase.</p>
-        {files.length === 0 ? <p>Nessun file caricato.</p> : files.map((file) => <div className="feature-row" key={file.name}>
+      <div className="feature-card audio-player-card">
+        <div className="audio-player-now">
+          <div className="audio-cover"><Music2 size={26} /></div>
+          <div className="audio-player-now-copy">
+            <strong>{playback ? displayName(currentFileName) : 'Seleziona un brano audio'}</strong>
+            <span>{activePlaylist?.name ?? 'Coda condivisa'}{playback ? ` · ${playback.playing ? 'in riproduzione' : 'in pausa'}` : ''}</span>
+          </div>
+          {playback && <button className={`audio-favorite-button ${favorites.includes(playback.object_path) ? 'audio-favorite-active' : ''}`} aria-label={favorites.includes(playback.object_path) ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'} onClick={() => {
+            const file = audioFiles.find((entry) => `${calendarId}/${entry.name}` === playback.object_path)
+            if (file) void toggleFavorite(file)
+          }}><Heart size={19} fill={favorites.includes(playback.object_path) ? 'currentColor' : 'none'} /></button>}
+        </div>
+        <audio
+          ref={mediaRef}
+          className="audio-player-engine"
+          src={joined ? mediaUrl || undefined : undefined}
+          preload="metadata"
+          onLoadedMetadata={() => {
+            if (!mediaRef.current) return
+            setAudioDuration(Number.isFinite(mediaRef.current.duration) ? mediaRef.current.duration : 0)
+            applyPlayback()
+          }}
+          onTimeUpdate={() => { if (mediaRef.current) setAudioTime(mediaRef.current.currentTime) }}
+          onEnded={() => void skipTrack(1)}
+          onError={() => { if (mediaUrl) setError('Il browser non riesce a riprodurre questo audio o formato.') }}
+        />
+        {playback && !joined && <button className="primary-button audio-join-button" onClick={() => {
+          setJoined(true)
+          void loadPlayback(true)
+        }}>Ascolta insieme</button>}
+        <div className="audio-player-controls">
+          <button className={`audio-mode-button ${playerSettings?.shuffle ? 'audio-mode-active' : ''}`} aria-label={playerSettings?.shuffle ? 'Disattiva casuale' : 'Attiva casuale'} aria-pressed={playerSettings?.shuffle ?? false} disabled={!playerSettings} onClick={() => void updatePlayerSettings({ shuffle: !playerSettings?.shuffle })}><Shuffle size={17} /></button>
+          <button aria-label="Brano precedente" disabled={!playback} onClick={() => void skipTrack(-1)}><SkipBack size={20} /></button>
+          <button className="audio-main-control" aria-label={playback?.playing ? 'Pausa per tutti' : 'Riproduci per tutti'} disabled={!playback} onClick={() => {
+            if (!playback) return
+            if (!joined) setJoined(true)
+            void control(playback.object_path, mediaRef.current?.currentTime ?? playback.position_seconds, !playback.playing, true)
+          }}>{playback?.playing ? <Pause size={20} /> : <Play size={20} />}</button>
+          <button aria-label="Brano successivo" disabled={!playback} onClick={() => void skipTrack(1)}><SkipForward size={20} /></button>
+          <button className={`audio-mode-button ${playerSettings?.repeat_mode !== 'off' ? 'audio-mode-active' : ''}`} aria-label={`Ripetizione ${playerSettings?.repeat_mode ?? 'off'}`} aria-pressed={playerSettings?.repeat_mode !== 'off'} disabled={!playerSettings} onClick={() => {
+            const nextMode = playerSettings?.repeat_mode === 'off' ? 'all' : playerSettings?.repeat_mode === 'all' ? 'one' : 'off'
+            void updatePlayerSettings({ repeat_mode: nextMode })
+          }}>{playerSettings?.repeat_mode === 'one' ? <Repeat1 size={17} /> : <Repeat size={17} />}</button>
+        </div>
+        <div className="audio-progress-row">
+          <span>{formatTime(audioTime)}</span>
+          <input aria-label="Avanzamento audio" type="range" min="0" max={audioDuration || 0} step="1" value={Math.min(audioTime, audioDuration || 0)} disabled={!joined || !playback || !audioDuration} onChange={(event) => setAudioTime(Number(event.target.value))} onPointerUp={() => {
+            if (playback) void control(playback.object_path, audioTime, playback.playing, true)
+          }} onKeyUp={() => {
+            if (playback) void control(playback.object_path, audioTime, playback.playing, true)
+          }} />
+          <span>{formatTime(audioDuration)}</span>
+          <Volume2 size={16} aria-hidden="true" />
+          <input aria-label="Volume audio" className="audio-volume" type="range" min="0" max="1" step="0.01" value={volume} onChange={(event) => setVolume(Number(event.target.value))} />
+        </div>
+      </div>
+      <div className="feature-card audio-library-card">
+        <div className="audio-library-heading"><h3>Libreria audio <span className="count-pill">{audioFiles.length}</span></h3><input aria-label="Cerca audio" value={libraryQuery} onChange={(event) => setLibraryQuery(event.target.value)} placeholder="Cerca nella libreria" /></div>
+        {!audioFiles.length ? <p>Nessun audio nello spazio. Carica un file audio per iniziare.</p> : visibleAudioFiles.length
+          ? visibleAudioFiles.map((file) => {
+            const path = `${calendarId}/${file.name}`
+            const isFavorite = favorites.includes(path)
+            return <div className="audio-track-row" key={file.name}>
+              <button className="audio-track-play" aria-label={`Riproduci ${displayName(file.name)}`} onClick={() => void playAudioFile(file)}><Play size={16} /></button>
+              <span className="audio-track-title">{displayName(file.name)}{typeof file.metadata?.size === 'number' ? <small>{` · ${(file.metadata.size / 1048576).toFixed(1)} MB`}</small> : null}</span>
+              <button className={`audio-favorite-button ${isFavorite ? 'audio-favorite-active' : ''}`} aria-label={isFavorite ? `Rimuovi ${displayName(file.name)} dai preferiti` : `Aggiungi ${displayName(file.name)} ai preferiti`} onClick={() => void toggleFavorite(file)}><Heart size={16} fill={isFavorite ? 'currentColor' : 'none'} /></button>
+              <button className="audio-add-button" disabled={!playerSettings} onClick={() => void addAudioToPlaylist(file)}>Aggiungi alla playlist</button>
+              <button className="audio-download-button" disabled={busy} onClick={() => void download(file.name)}>Scarica</button>
+            </div>
+          })
+          : <p>Nessun audio corrisponde alla ricerca.</p>}
+      </div>
+      <div className="feature-card audio-queue-card">
+        <div className="audio-library-heading">
+          <h3>Playlist condivise</h3>
+          <select aria-label="Playlist attiva" value={playerSettings?.active_playlist_id ?? ''} onChange={(event) => void selectPlaylist(event.target.value)}>
+            {playlists.map((playlist) => <option value={playlist.id} key={playlist.id}>{playlist.name}</option>)}
+          </select>
+          {activePlaylist && !activePlaylist.is_queue && <button className="delete-button" onClick={() => void deletePlaylist(activePlaylist)}><Trash2 size={15} /> Elimina playlist</button>}
+        </div>
+        <form className="audio-create-playlist" onSubmit={(event) => void createPlaylist(event)}>
+          <input aria-label="Nome nuova playlist" value={playlistName} onChange={(event) => setPlaylistName(event.target.value)} placeholder="Crea una playlist" maxLength={60} />
+          <button className="primary-button" disabled={!playlistName.trim()}>Crea playlist</button>
+        </form>
+        <h4>{activePlaylist?.is_queue ? 'Coda condivisa' : activePlaylist?.name ?? 'Playlist'}</h4>
+        {!playlistItems.length ? <p>Playlist vuota. Aggiungi brani dalla libreria audio.</p> : playlistItems.map((item, index) => {
+          const file = audioFiles.find((entry) => `${calendarId}/${entry.name}` === item.object_path)
+          const isCurrent = playback?.object_path === item.object_path
+          return <div className={`audio-track-row ${isCurrent ? 'audio-track-current' : ''}`} key={`${item.playlist_id}:${item.object_path}`}>
+            <button className="audio-track-play" aria-label={`Riproduci ${file ? displayName(file.name) : displayName(item.object_path.split('/').pop() ?? '')}`} disabled={!file} onClick={() => file && void playAudioFile(file)}>{isCurrent && playback?.playing ? <Pause size={16} /> : <Play size={16} />}</button>
+            <span className="audio-track-title">{file ? displayName(file.name) : displayName(item.object_path.split('/').pop() ?? 'File non disponibile')}</span>
+            <button className="audio-order-button" aria-label="Sposta brano in alto" disabled={index === 0} onClick={() => void movePlaylistItem(item, -1)}><SkipBack size={14} /></button>
+            <button className="audio-order-button" aria-label="Sposta brano in basso" disabled={index === playlistItems.length - 1} onClick={() => void movePlaylistItem(item, 1)}><SkipForward size={14} /></button>
+            <button className="audio-remove-button" aria-label="Rimuovi brano dalla playlist" onClick={() => void removePlaylistItem(item)}><Trash2 size={14} /></button>
+          </div>
+        })}
+      </div>
+      {favorites.length > 0 && <details className="feature-card audio-favorites-card"><summary>Preferiti personali <span className="count-pill">{favorites.length}</span></summary>
+        {favorites.map((path) => {
+          const file = audioFiles.find((entry) => `${calendarId}/${entry.name}` === path)
+          return <div className="audio-track-row" key={path}>
+            <button className="audio-track-play" aria-label={`Riproduci ${file ? displayName(file.name) : displayName(path.split('/').pop() ?? '')}`} disabled={!file} onClick={() => file && void playAudioFile(file)}><Play size={16} /></button>
+            <span className="audio-track-title">{file ? displayName(file.name) : displayName(path.split('/').pop() ?? '')}</span>
+            <button className="audio-add-button" disabled={!file} onClick={() => file && void addAudioToPlaylist(file)}>Aggiungi alla playlist</button>
+          </div>
+        })}
+      </details>}
+      <details className="feature-card disclosure-card audio-archive">
+        <summary>Altri file dello spazio <span className="count-pill">{otherFiles.length}</span></summary>
+        <p>Video e documenti restano archiviati e scaricabili qui; per i video in diretta usa la scheda Diretta.</p>
+        {otherFiles.length === 0 ? <p>Nessun file non audio.</p> : otherFiles.map((file) => <div className="feature-row" key={file.name}>
           <span>{displayName(file.name)}{typeof file.metadata?.size === 'number' ? ` · ${(file.metadata.size / 1048576).toFixed(1)} MB` : ''}</span>
           <button disabled={busy} onClick={() => void download(file.name)}>Scarica</button>
-          {canEdit && <><button disabled={busy} onClick={() => void control(`${calendarId}/${file.name}`, 0, false)}>Seleziona per riprodurre</button><button disabled={busy} onClick={() => void remove(file.name)}>Elimina</button></>}
+          {canEdit && <button disabled={busy} onClick={() => void remove(file.name)}>Elimina</button>}
         </div>)}
-      </div>
+      </details>
       {canEdit && <div className="feature-card"><h3>Carica un file</h3><form className="feature-form" onSubmit={(event) => void upload(event)}>
-        <label>File<input ref={fileInputRef} type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} /></label>
+        <label>File audio, video o documento<input ref={fileInputRef} type="file" onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} /></label>
         {uploadProgress !== null && <p role="status">Caricamento riprendibile: {uploadProgress}%</p>}
-        <button className="primary-button" disabled={busy || !selectedFile}>Carica</button>
+        <button className="primary-button" disabled={busy || !selectedFile}>Carica file</button>
       </form></div>}
     </section>
     <section id={`${tabsId}-panel-live`} role="tabpanel" aria-labelledby={`${tabsId}-tab-live`} tabIndex={0} hidden={activeTab !== 'live'}>
@@ -957,67 +1376,33 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
       <p>La connessione usa WebRTC diretto; alcune reti o browser possono impedirla. La riproduzione e il punto di avanzamento sono controllati dall’host.</p>
     </div>
     </section>
-    <section id={`${tabsId}-panel-playback`} role="tabpanel" aria-labelledby={`${tabsId}-tab-playback`} tabIndex={0} hidden={activeTab !== 'playback'}>
-    <div className="feature-card">
-      <h3>Riproduzione sincronizzata</h3>
-      <p>Ogni dispositivo deve aprire questa sezione e attivare la riproduzione. Sono supportati i formati audio e video riproducibili dal browser; la sincronizzazione è approssimativa e dipende dalla rete.</p>
-      <p>{playback ? `${displayName(playback.object_path.split('/').pop() ?? '')} · ${playback.playing ? 'in riproduzione' : 'in pausa'}` : 'Nessun file selezionato.'}</p>
-      <button className="primary-button" onClick={() => {
-        setJoined((current) => !current)
-        if (joined) { mediaRef.current?.pause(); signedRef.current = null; setMediaUrl('') }
-      }}>{joined ? 'Esci dalla riproduzione' : 'Partecipa alla riproduzione'}</button>
-      {joined && <><video ref={mediaRef} src={mediaUrl || undefined} controls playsInline onLoadedMetadata={applyPlayback} onError={() => { if (mediaUrl) setError('Il browser non riesce a riprodurre questo file o formato.') }} />
-        <button onClick={() => {
-          if (!mediaRef.current || !playback?.playing) { setNotice('Attendi che un editor avvii la riproduzione.'); return }
-          void mediaRef.current.play().then(() => setNotice('')).catch(() => setNotice('Il browser non riesce ad avviare la riproduzione su questo dispositivo.'))
-        }}>Attiva riproduzione</button>
-      </>}
-      {canEdit && playback && <div className="feature-row">
-        <button disabled={busy} onClick={() => void control(playback.object_path, roomRef.current ? positionAt(roomRef.current.state, roomRef.current.receivedAt) : playback.position_seconds, !playback.playing)}>{playback.playing ? 'Pausa per tutti' : 'Riproduci per tutti'}</button>
-        <label>Vai al secondo <input type="number" min="0" max="604800" step="1" value={seek} onChange={(event) => setSeek(event.target.value)} /></label>
-        <button disabled={busy || seek === '' || !Number.isFinite(Number(seek)) || Number(seek) < 0 || Number(seek) > 604800} onClick={() => void control(playback.object_path, Number(seek), playback.playing)}>Vai</button>
-      </div>}
-    </div>
-    </section>
     <section id={`${tabsId}-panel-call`} role="tabpanel" aria-labelledby={`${tabsId}-tab-call`} tabIndex={0} hidden={activeTab !== 'call'}>
       <div className="feature-card media-call-card">
         <div className="media-call-heading">
           <div><h3>Chiamata del gruppo</h3><p>Parlate mentre guardate un video; la riproduzione resta attiva passando tra le schede.</p></div>
           <span className="count-pill"><UsersRound size={14} /> {inCall ? callPeers.length + 1 : 0}/{maxCallParticipants}</span>
         </div>
-        {inCall ? <div className="media-call-grid">
-          <article className="media-call-tile media-call-self">
-            {localCallStream && <video ref={localCallMediaRef} className={!cameraEnabled ? 'media-call-video-hidden' : ''} autoPlay muted playsInline />}
-            {!cameraEnabled && <div className="media-call-placeholder"><VideoOff size={28} /><span>Videocamera disattivata</span></div>}
-            <div className="media-call-tile-label"><span>{memberName} (tu)</span>{micEnabled ? <Mic size={15} /> : <MicOff size={15} />}</div>
-          </article>
-          {callPeers.map((peer) => <article className="media-call-tile" key={peer.peerId}>
-            {peer.stream && <video ref={(element) => {
-                if (element) remoteCallMediaRefs.current.set(peer.peerId, element)
-                else remoteCallMediaRefs.current.delete(peer.peerId)
-            }} className={!peer.videoEnabled ? 'media-call-video-hidden' : ''} autoPlay playsInline controls muted={!speakerEnabled} />}
-            {(!peer.videoEnabled || !peer.stream) && <div className="media-call-placeholder"><VideoOff size={28} /><span>{peer.stream ? 'Videocamera disattivata' : 'Connessione in corso…'}</span></div>}
-            <div className="media-call-tile-label"><span>{peer.name}</span>{peer.audioEnabled ? <Mic size={15} /> : <MicOff size={15} />}</div>
-          </article>)}
-          {callPeers.length === 0 && <p className="media-call-waiting">Sei in chiamata. Invia agli altri membri il nome di questo spazio e chiedi loro di aprire la scheda Chiamata.</p>}
-        </div> : <div className="media-call-empty">
+        {inCall ? (pipWindow || pipFallback
+          ? <p className="media-call-popout-note">La chiamata è nella finestra picture-in-picture. Puoi continuare a guardare il film in questa scheda.</p>
+          : <CallStage memberName={memberName} localStream={localCallStream} peers={callPeers} cameraEnabled={cameraEnabled} micEnabled={micEnabled} speakerEnabled={speakerEnabled} />) : <div className="media-call-empty">
           <div className="media-call-empty-icon"><Phone size={25} /></div>
           <strong>Una chiamata, senza uscire dal film</strong>
           <p>Avvia o raggiungi la chiamata condivisa con i membri di questo spazio.</p>
           <button className="primary-button" disabled={!channelReady} onClick={() => void startCall()}><Phone size={16} />{channelReady ? 'Entra nella chiamata' : 'Connessione al canale…'}</button>
         </div>}
-        {inCall && <div className="media-call-controls">
-          <button aria-pressed={!micEnabled} onClick={() => toggleCallTrack('audio')} disabled={!localCallStream?.getAudioTracks().length}>
-            {micEnabled ? <Mic size={18} /> : <MicOff size={18} />}{micEnabled ? 'Disattiva microfono' : 'Attiva microfono'}
-          </button>
-          <button aria-pressed={!cameraEnabled} onClick={() => toggleCallTrack('video')} disabled={!localCallStream?.getVideoTracks().length}>
-            {cameraEnabled ? <Video size={18} /> : <VideoOff size={18} />}{cameraEnabled ? 'Spegni videocamera' : 'Accendi videocamera'}
-          </button>
-          <button aria-pressed={!speakerEnabled} onClick={() => setSpeakerEnabled((enabled) => !enabled)}>
-            {speakerEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}{speakerEnabled ? 'Disattiva altoparlanti' : 'Attiva altoparlanti'}
-          </button>
-          <button className="media-call-hangup" onClick={stopCall}><PhoneOff size={18} /> Esci dalla chiamata</button>
-        </div>}
+        {inCall && <CallControls
+          compact={false}
+          micEnabled={micEnabled}
+          cameraEnabled={cameraEnabled}
+          speakerEnabled={speakerEnabled}
+          pipActive={Boolean(pipWindow || pipFallback)}
+          pipSupported={pipSupported}
+          onMic={() => toggleCallTrack('audio')}
+          onCamera={() => toggleCallTrack('video')}
+          onSpeaker={() => setSpeakerEnabled((enabled) => !enabled)}
+          onPictureInPicture={() => void toggleCallPictureInPicture()}
+          onHangup={stopCall}
+        />}
         <label className="media-call-quality">Priorità banda in uscita
           <select value={networkPriority} onChange={(event) => {
             const value = event.target.value
@@ -1031,5 +1416,128 @@ export function SharedMedia({ calendarId, canEdit, memberName }: { calendarId: s
         <p className="media-call-note">La qualità imposta un limite massimo al video inviato da questo dispositivo, non garantisce banda minima. Chiamata peer-to-peer fino a {maxCallParticipants} persone; alcune reti possono impedire la connessione diretta. Audio e video sono trasmessi agli altri partecipanti, non registrati né salvati dall’app. Usa microfono e videocamera solo con il consenso delle persone presenti.</p>
       </div>
     </section>
+    {inCall && pipFallback && <aside className="media-call-floating" aria-label="Chiamata flottante">
+      <div className="media-call-floating-heading"><strong>Chiamata · {callPeers.length + 1}/{maxCallParticipants}</strong><button className="icon-button" aria-label="Chiudi finestra flottante" onClick={closeCallPictureInPicture}><PhoneOff size={16} /></button></div>
+      <CallStage memberName={memberName} localStream={localCallStream} peers={callPeers} cameraEnabled={cameraEnabled} micEnabled={micEnabled} speakerEnabled={speakerEnabled} compact />
+      <CallControls
+        compact
+        micEnabled={micEnabled}
+        cameraEnabled={cameraEnabled}
+        speakerEnabled={speakerEnabled}
+        pipActive
+        pipSupported={false}
+        onMic={() => toggleCallTrack('audio')}
+        onCamera={() => toggleCallTrack('video')}
+        onSpeaker={() => setSpeakerEnabled((enabled) => !enabled)}
+        onPictureInPicture={closeCallPictureInPicture}
+        onHangup={stopCall}
+      />
+    </aside>}
+    {inCall && pipTarget && createPortal(
+      <div className="media-call-pip-window">
+        <div className="media-call-floating-heading"><strong>Chiamata · {callPeers.length + 1}/{maxCallParticipants}</strong><button className="icon-button" aria-label="Chiudi picture-in-picture" onClick={closeCallPictureInPicture}><PhoneOff size={16} /></button></div>
+        <CallStage memberName={memberName} localStream={localCallStream} peers={callPeers} cameraEnabled={cameraEnabled} micEnabled={micEnabled} speakerEnabled={speakerEnabled} compact />
+        <CallControls
+          compact
+          micEnabled={micEnabled}
+          cameraEnabled={cameraEnabled}
+          speakerEnabled={speakerEnabled}
+          pipActive
+          pipSupported
+          onMic={() => toggleCallTrack('audio')}
+          onCamera={() => toggleCallTrack('video')}
+          onSpeaker={() => setSpeakerEnabled((enabled) => !enabled)}
+          onPictureInPicture={closeCallPictureInPicture}
+          onHangup={stopCall}
+        />
+      </div>,
+      pipTarget,
+    )}
   </section>
+}
+
+function CallStage({
+  memberName,
+  localStream,
+  peers,
+  cameraEnabled,
+  micEnabled,
+  speakerEnabled,
+  compact = false,
+}: {
+  memberName: string
+  localStream: MediaStream | null
+  peers: CallPeer[]
+  cameraEnabled: boolean
+  micEnabled: boolean
+  speakerEnabled: boolean
+  compact?: boolean
+}) {
+  const localVideoRef = useRef<HTMLVideoElement>(null)
+  const peerVideoRefs = useRef(new Map<string, HTMLVideoElement>())
+
+  useEffect(() => {
+    if (localVideoRef.current) localVideoRef.current.srcObject = localStream
+  }, [localStream])
+
+  useEffect(() => {
+    for (const peer of peers) {
+      const video = peerVideoRefs.current.get(peer.peerId)
+      if (!video || !peer.stream) continue
+      video.srcObject = peer.stream
+      void video.play().catch(() => undefined)
+    }
+  }, [peers])
+
+  return <div className={`media-call-grid ${compact ? 'media-call-grid-compact' : ''}`}>
+    <article className="media-call-tile media-call-self">
+      {localStream && <video ref={localVideoRef} className={!cameraEnabled ? 'media-call-video-hidden' : ''} autoPlay muted playsInline />}
+      {!cameraEnabled && <div className="media-call-placeholder"><VideoOff size={compact ? 20 : 28} /><span>Videocamera disattivata</span></div>}
+      <div className="media-call-tile-label"><span>{memberName} (tu)</span>{micEnabled ? <Mic size={compact ? 13 : 15} /> : <MicOff size={compact ? 13 : 15} />}</div>
+    </article>
+    {peers.map((peer) => <article className="media-call-tile" key={peer.peerId}>
+      {peer.stream && <video ref={(element) => {
+        if (element) peerVideoRefs.current.set(peer.peerId, element)
+        else peerVideoRefs.current.delete(peer.peerId)
+      }} className={!peer.videoEnabled ? 'media-call-video-hidden' : ''} autoPlay playsInline muted={!speakerEnabled} />}
+      {(!peer.videoEnabled || !peer.stream) && <div className="media-call-placeholder"><VideoOff size={compact ? 20 : 28} /><span>{peer.stream ? 'Videocamera disattivata' : 'Connessione in corso…'}</span></div>}
+      <div className="media-call-tile-label"><span>{peer.name}</span>{peer.audioEnabled ? <Mic size={compact ? 13 : 15} /> : <MicOff size={compact ? 13 : 15} />}</div>
+    </article>)}
+    {peers.length === 0 && !compact && <p className="media-call-waiting">Sei in chiamata. Gli altri membri possono unirsi dalla scheda Chiamata.</p>}
+  </div>
+}
+
+function CallControls({
+  compact = false,
+  micEnabled,
+  cameraEnabled,
+  speakerEnabled,
+  pipActive,
+  pipSupported,
+  onMic,
+  onCamera,
+  onSpeaker,
+  onPictureInPicture,
+  onHangup,
+}: {
+  compact?: boolean
+  micEnabled: boolean
+  cameraEnabled: boolean
+  speakerEnabled: boolean
+  pipActive: boolean
+  pipSupported: boolean
+  onMic: () => void
+  onCamera: () => void
+  onSpeaker: () => void
+  onPictureInPicture: () => void
+  onHangup: () => void
+}) {
+  const pipLabel = pipActive ? 'Chiudi finestra PiP' : pipSupported ? 'Apri Picture in Picture' : 'Finestra flottante'
+  return <div className={`media-call-controls ${compact ? 'media-call-controls-compact' : ''}`}>
+    <button aria-pressed={!micEnabled} onClick={onMic}>{micEnabled ? <Mic size={17} /> : <MicOff size={17} />}{!compact && (micEnabled ? 'Microfono' : 'Microfono disattivato')}</button>
+    <button aria-pressed={!cameraEnabled} onClick={onCamera}>{cameraEnabled ? <Video size={17} /> : <VideoOff size={17} />}{!compact && (cameraEnabled ? 'Videocamera' : 'Videocamera disattivata')}</button>
+    <button aria-pressed={!speakerEnabled} onClick={onSpeaker}>{speakerEnabled ? <Volume2 size={17} /> : <VolumeX size={17} />}{!compact && (speakerEnabled ? 'Altoparlanti' : 'Audio disattivato')}</button>
+    <button aria-pressed={pipActive} onClick={onPictureInPicture}><Phone size={17} />{!compact && pipLabel}</button>
+    <button className="media-call-hangup" onClick={onHangup}><PhoneOff size={17} />{!compact && 'Esci'}</button>
+  </div>
 }

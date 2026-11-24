@@ -1,4 +1,4 @@
-export type DatabaseMode = 'checking' | 'online' | 'offline' | 'syncing' | 'warning' | 'error'
+export type DatabaseMode = 'checking' | 'online' | 'offline' | 'error'
 
 export type DatabaseStatus = {
   mode: DatabaseMode
