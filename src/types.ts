@@ -1,6 +1,8 @@
 export type CalendarItemType = 'event' | 'task' | 'lesson'
 export type CalendarView = 'week' | 'month'
 export type MemberColor = 'violet' | 'blue' | 'coral' | 'green' | 'amber' | 'pink'
+export type EventTexture = 'plain' | 'stripes' | 'dots' | 'grid'
+export type EventBorder = 'solid' | 'dashed' | 'double'
 
 export const MEMBER_COLORS: Record<MemberColor, string> = {
   violet: '#7068d8',
@@ -18,6 +20,8 @@ export interface CalendarMember {
   color: MemberColor
   role: 'owner' | 'member'
   can_edit: boolean
+  style_border: EventBorder
+  allow_style_editors: boolean
 }
 
 export interface CalendarItem {
@@ -32,8 +36,23 @@ export interface CalendarItem {
   completed: boolean
   assignee_id: string | null
   created_by: string
-  visibility: 'everyone' | 'selected'
+  visibility: 'private' | 'everyone' | 'selected'
   visible_to: string[]
+  editable_by: string[]
+  tags: string[]
+}
+
+export interface CalendarViewPreferences {
+  calendar_id: string
+  user_id: string
+  hidden_item_ids: string[]
+  hidden_member_ids: string[]
+  category_styles: Partial<Record<CalendarItemType, CategoryAppearance>>
+}
+
+export interface CategoryAppearance {
+  color: MemberColor
+  texture: EventTexture
 }
 
 export interface FamilyCalendar {

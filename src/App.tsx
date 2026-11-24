@@ -26,12 +26,15 @@ import {
   CircleHelp,
   Clock3,
   Copy,
+  Eye,
+  EyeOff,
   LoaderCircle,
   LogOut,
   Menu,
   Plus,
   Settings2,
   Sparkles,
+  Tag,
   Trash2,
   UsersRound,
   X,
@@ -45,12 +48,15 @@ import { ProfileSection } from './ProfileSection'
 import { MiiPortrait, normalizeMii } from './mii'
 import {
   MEMBER_COLORS,
+  type CategoryAppearance,
+  type CalendarViewPreferences,
   type CalendarItem,
   type CalendarItemType,
   type CalendarMember,
   type CalendarView,
   type FamilyCalendar,
   type MemberColor,
+  type EventTexture,
   type MiiConfig,
   type UserProfile,
 } from './types'
@@ -62,6 +68,58 @@ const itemLabels: Record<CalendarItemType, string> = {
   event: 'Evento',
   task: 'Task',
   lesson: 'Lezione',
+}
+const itemTypes: CalendarItemType[] = ['event', 'task', 'lesson']
+const memberColorOptions: Array<[MemberColor, string]> = [
+  ['violet', 'Viola'], ['blue', 'Blu'], ['coral', 'Corallo'],
+  ['green', 'Verde'], ['amber', 'Ambra'], ['pink', 'Rosa'],
+]
+const eventTextures: Array<[EventTexture, string]> = [
+  ['plain', 'Tinta unita'], ['stripes', 'Righe'], ['dots', 'Punti'], ['grid', 'Griglia'],
+]
+const itemPalettes: Record<MemberColor, { background: string; foreground: string }> = {
+  violet: { background: '#f0efff', foreground: '#514bb1' },
+  blue: { background: '#eef2ff', foreground: '#43569b' },
+  coral: { background: '#fff0ed', foreground: '#9b5146' },
+  green: { background: '#e9f7f2', foreground: '#327b69' },
+  amber: { background: '#fff5e8', foreground: '#946126' },
+  pink: { background: '#fff0f8', foreground: '#984d7e' },
+}
+const defaultCategoryStyles: Record<CalendarItemType, CategoryAppearance> = {
+  event: { color: 'blue', texture: 'plain' },
+  task: { color: 'green', texture: 'dots' },
+  lesson: { color: 'amber', texture: 'stripes' },
+}
+
+function isMemberColor(value: unknown): value is MemberColor {
+  return typeof value === 'string' && memberColorOptions.some(([color]) => color === value)
+}
+
+function isEventTexture(value: unknown): value is EventTexture {
+  return typeof value === 'string' && eventTextures.some(([texture]) => texture === value)
+}
+
+function defaultViewPreferences(calendarId: string, userId: string): CalendarViewPreferences {
+  return { calendar_id: calendarId, user_id: userId, hidden_item_ids: [], hidden_member_ids: [], category_styles: defaultCategoryStyles }
+}
+
+function normalizeViewPreferences(value: unknown, calendarId: string, userId: string): CalendarViewPreferences {
+  const defaults = defaultViewPreferences(calendarId, userId)
+  if (!value || typeof value !== 'object') return defaults
+  const row = value as Partial<CalendarViewPreferences>
+  const styles: CalendarViewPreferences['category_styles'] = { ...defaultCategoryStyles }
+  for (const type of itemTypes) {
+    const style = row.category_styles?.[type]
+    if (style && isMemberColor(style.color) && isEventTexture(style.texture)) {
+      styles[type] = { color: style.color, texture: style.texture }
+    }
+  }
+  return {
+    ...defaults,
+    hidden_item_ids: Array.isArray(row.hidden_item_ids) ? row.hidden_item_ids.filter((id): id is string => typeof id === 'string') : [],
+    hidden_member_ids: Array.isArray(row.hidden_member_ids) ? row.hidden_member_ids.filter((id): id is string => typeof id === 'string') : [],
+    category_styles: styles,
+  }
 }
 
 function memberDisplayName(member: CalendarMember) {
@@ -119,6 +177,8 @@ function App() {
   const [view, setView] = useState<CalendarView>('week')
   const [filter, setFilter] = useState<ItemFilter>('all')
   const [memberFilter, setMemberFilter] = useState<string | null>(null)
+  const [filterText, setFilterText] = useState('')
+  const [viewPreferences, setViewPreferences] = useState<{ key: string; value: CalendarViewPreferences; exists: boolean } | null>(null)
   const [editorItem, setEditorItem] = useState<CalendarItem | null | undefined>(undefined)
   const [draftItem, setDraftItem] = useState<CalendarItem | null>(null)
   const [createDay, setCreateDay] = useState<Date | null>(null)
@@ -131,15 +191,31 @@ function App() {
   const [databaseStatus, setDatabaseStatusState] = useState(getDatabaseStatus)
 
   const user = session?.user ?? null
+  const viewPreferencesKey = calendar && user ? `${calendar.id}:${user.id}` : ''
+  const activeViewPreferences = viewPreferences?.key === viewPreferencesKey
+    ? viewPreferences.value
+    : calendar && user ? defaultViewPreferences(calendar.id, user.id) : null
   const currentMember = members.find((member) => member.user_id === user?.id)
   const myMii = user ? profiles[user.id]?.avatar ?? null : null
   const canEdit = currentMember?.role === 'owner' || currentMember?.can_edit === true
+  const canEditItem = (item: CalendarItem) => Boolean(user && (
+    item.created_by === user.id || item.editable_by?.includes(user.id)
+  ))
   const selectedItems = useMemo(
-    () => items.filter((item) =>
-      (filter === 'all' || item.item_type === filter)
-      && (memberFilter === null || item.assignee_id === memberFilter),
-    ),
-    [filter, items, memberFilter],
+    () => {
+      const query = filterText.trim().toLocaleLowerCase('it-IT')
+      const hiddenItems = activeViewPreferences?.hidden_item_ids ?? []
+      const hiddenMembers = activeViewPreferences?.hidden_member_ids ?? []
+      return items.filter((item) =>
+        (filter === 'all' || item.item_type === filter)
+        && (memberFilter === null || item.assignee_id === memberFilter)
+        && !hiddenItems.includes(item.id)
+        && !hiddenMembers.includes(item.created_by)
+        && (!query || [item.title, item.description, ...(item.tags ?? [])]
+          .some((value) => value.toLocaleLowerCase('it-IT').includes(query))),
+      )
+    },
+    [activeViewPreferences, filter, filterText, items, memberFilter],
   )
 
   useEffect(() => {
@@ -195,6 +271,7 @@ function App() {
         setInviteCode(null)
         setEditInviteCode(null)
         setItems([])
+        setViewPreferences(null)
         return
       }
 
@@ -209,7 +286,7 @@ function App() {
 
       const { data: membershipRows, error: membersError } = await supabase
         .from('calendar_members')
-        .select('calendar_id, user_id, display_name, color, role, can_edit')
+        .select('calendar_id, user_id, display_name, color, role, can_edit, style_border, allow_style_editors')
         .in('calendar_id', (calendarRows ?? []).map((row) => row.id))
         .order('created_at')
       if (membersError) throw membersError
@@ -227,12 +304,20 @@ function App() {
         avatar: normalizeMii(row.avatar),
       }]))
 
-      const { data: calendarItems, error: itemsError } = await supabase
-        .from('calendar_items')
-        .select('*')
-        .eq('calendar_id', calendarRow.id)
-        .order('starts_at')
-      if (itemsError) throw itemsError
+      const [itemsResult, preferencesResult] = await Promise.all([
+        supabase
+          .from('calendar_items')
+          .select('*')
+          .eq('calendar_id', calendarRow.id)
+          .order('starts_at'),
+        supabase
+          .from('calendar_view_preferences')
+          .select('calendar_id, user_id, hidden_item_ids, hidden_member_ids, category_styles')
+          .eq('calendar_id', calendarRow.id)
+          .eq('user_id', currentUser.id),
+      ])
+      if (itemsResult.error) throw itemsResult.error
+      if (preferencesResult.error) throw preferencesResult.error
       let code: string | null = null
       let editCode: string | null = null
       if (calendarMembers?.some((member) => member.user_id === currentUser.id && member.role === 'owner')) {
@@ -254,7 +339,12 @@ function App() {
       setProfiles(loadedProfiles)
       setInviteCode(code)
       setEditInviteCode(editCode)
-      setItems(calendarItems ?? [])
+      setItems((itemsResult.data ?? []) as CalendarItem[])
+      setViewPreferences({
+        key: `${calendarRow.id}:${currentUser.id}`,
+        value: normalizeViewPreferences(preferencesResult.data?.[0], calendarRow.id, currentUser.id),
+        exists: Boolean(preferencesResult.data?.length),
+      })
     } catch (loadError) {
       if (sequence === loadSequence.current) setError(`Impossibile caricare il calendario: ${readableError(loadError)}`)
     } finally {
@@ -266,6 +356,67 @@ function App() {
     if (user) void loadCalendar(user)
   }, [loadCalendar, user])
 
+  const saveViewPreferences = async (next: CalendarViewPreferences) => {
+    if (!supabase || !calendar || !user) return
+    const key = `${calendar.id}:${user.id}`
+    const row = {
+      calendar_id: calendar.id,
+      user_id: user.id,
+      hidden_item_ids: next.hidden_item_ids,
+      hidden_member_ids: next.hidden_member_ids,
+      category_styles: next.category_styles,
+    }
+    const previous = viewPreferences?.key === key
+      ? viewPreferences
+      : { key, value: defaultViewPreferences(calendar.id, user.id), exists: false }
+    const exists = previous.exists
+    setViewPreferences({ key, value: next, exists: true })
+    const result = exists
+      ? await supabase.from('calendar_view_preferences').update(row).eq('calendar_id', calendar.id).eq('user_id', user.id)
+      : await supabase.from('calendar_view_preferences').insert(row)
+    if (result.error) {
+      setViewPreferences(previous)
+      setError(`Impossibile salvare le preferenze personali: ${result.error.message}`)
+      return
+    }
+    if (!exists) setViewPreferences({ key, value: next, exists: true })
+  }
+
+  const toggleHiddenItem = (itemId: string) => {
+    if (!activeViewPreferences) return
+    const hidden = activeViewPreferences.hidden_item_ids.includes(itemId)
+    void saveViewPreferences({
+      ...activeViewPreferences,
+      hidden_item_ids: hidden
+        ? activeViewPreferences.hidden_item_ids.filter((id) => id !== itemId)
+        : [...activeViewPreferences.hidden_item_ids, itemId],
+    })
+  }
+
+  const toggleHiddenMember = (memberId: string) => {
+    if (!activeViewPreferences) return
+    const hidden = activeViewPreferences.hidden_member_ids.includes(memberId)
+    void saveViewPreferences({
+      ...activeViewPreferences,
+      hidden_member_ids: hidden
+        ? activeViewPreferences.hidden_member_ids.filter((id) => id !== memberId)
+        : [...activeViewPreferences.hidden_member_ids, memberId],
+    })
+  }
+
+  const updateCategoryStyle = (itemType: CalendarItemType, change: Partial<{ color: MemberColor; texture: EventTexture }>) => {
+    if (!activeViewPreferences) return
+    const current = activeViewPreferences.category_styles?.[itemType] ?? defaultCategoryStyles[itemType]
+    void saveViewPreferences({
+      ...activeViewPreferences,
+      category_styles: {
+        ...defaultCategoryStyles,
+        ...activeViewPreferences.category_styles,
+        [itemType]: { ...current, ...change },
+      },
+    })
+  }
+
   useEffect(() => {
     if (!user || !supabase) {
       loadSequence.current += 1
@@ -276,6 +427,7 @@ function App() {
       setInviteCode(null)
       setEditInviteCode(null)
       setItems([])
+      setViewPreferences(null)
       return
     }
     void loadCalendar(user)
@@ -296,6 +448,13 @@ function App() {
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'calendar_members', filter: `calendar_id=eq.${calendar.id}` },
+        () => {
+          void loadCalendar(user)
+        },
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'calendar_view_preferences', filter: `calendar_id=eq.${calendar.id}` },
         () => {
           void loadCalendar(user)
         },
@@ -340,8 +499,8 @@ function App() {
   }
 
   const openNewItem = (day: Date) => {
-    if (!canEdit) {
-      setNotice('Hai accesso in sola lettura a questo calendario.')
+    if (!user || !calendar) {
+      setNotice('Accedi a un calendario prima di creare un evento.')
       return
     }
     setCreateDay(day)
@@ -350,8 +509,8 @@ function App() {
   }
 
   const createTimedDraft = (day: Date, minuteOfDay: number) => {
-    if (!canEdit || !user || !calendar) {
-      setNotice('Hai accesso in sola lettura a questo calendario.')
+    if (!user || !calendar) {
+      setNotice('Accedi a un calendario prima di creare un evento.')
       return
     }
     const startsAt = new Date(day)
@@ -372,6 +531,8 @@ function App() {
       created_by: user.id,
       visibility: 'everyone',
       visible_to: [],
+      editable_by: [],
+      tags: [],
     }
     setCreateDay(startsAt)
     setDraftItem(draft)
@@ -380,7 +541,7 @@ function App() {
   }
 
   const updateTimedItem = async (item: CalendarItem, startsAt: Date, endsAt: Date) => {
-    if (!supabase || !user || !canEdit) return
+    if (!supabase || !user || !canEditItem(item)) return
     const isDraft = item.id.startsWith('draft:')
     if (isDraft) {
       setDraftItem({ ...item, starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString() })
@@ -412,12 +573,16 @@ function App() {
     ends_at: string
     all_day: boolean
     assignee_id: string | null
-    visibility: 'everyone' | 'selected'
+    visibility: 'private' | 'everyone' | 'selected'
     visible_to: string[]
+    editable_by: string[]
+    tags: string[]
   }) => {
     if (!supabase || !calendar || !user) return false
     setError('')
-    const payload = {
+    const isDraft = editorItem?.id.startsWith('draft:') ?? false
+    const canManageSharing = !editorItem || isDraft || editorItem.created_by === user.id
+    const content = {
       calendar_id: calendar.id,
       title: form.title.trim(),
       description: form.description.trim(),
@@ -426,14 +591,24 @@ function App() {
       ends_at: new Date(form.ends_at).toISOString(),
       all_day: form.all_day,
       assignee_id: form.assignee_id,
+      tags: form.tags,
+    }
+    const sharing = canManageSharing ? {
       visibility: form.visibility,
       visible_to: form.visibility === 'selected' ? form.visible_to : [],
-    }
+      editable_by: form.editable_by,
+    } : {}
     try {
-      const isDraft = editorItem?.id.startsWith('draft:') ?? false
       const result = editorItem && !isDraft
-        ? await supabase.from('calendar_items').update(payload).eq('id', editorItem.id).select('id').maybeSingle()
-        : await supabase.from('calendar_items').insert({ ...payload, created_by: user.id })
+        ? await supabase.from('calendar_items').update({ ...content, ...sharing }).eq('id', editorItem.id).select('id').maybeSingle()
+        : await supabase.from('calendar_items').insert({
+          ...content,
+          ...sharing,
+          created_by: user.id,
+          visibility: form.visibility,
+          visible_to: form.visibility === 'selected' ? form.visible_to : [],
+          editable_by: form.editable_by,
+        })
       if (result.error) {
         setError(`Impossibile salvare: ${result.error.message}`)
         return false
@@ -473,8 +648,8 @@ function App() {
 
   const toggleTask = async (item: CalendarItem) => {
     if (!supabase || !user) return
-    if (!canEdit) {
-      setNotice('Hai accesso in sola lettura a questo calendario.')
+    if (!canEditItem(item)) {
+      setNotice('Il creatore non ti ha autorizzato a modificare questa task.')
       return
     }
     try {
@@ -498,13 +673,25 @@ function App() {
     }
   }
 
-  const saveProfile = async (input: { displayName: string; color: MemberColor; bio: string; avatar: MiiConfig | null }) => {
+  const saveProfile = async (input: {
+    displayName: string
+    color: MemberColor
+    styleBorder: CalendarMember['style_border']
+    allowStyleEditors: boolean
+    bio: string
+    avatar: MiiConfig | null
+  }) => {
     if (!supabase || !calendar || !user) return false
     setError('')
     try {
       const { error: updateError } = await supabase
         .from('calendar_members')
-        .update({ display_name: input.displayName.trim(), color: input.color })
+        .update({
+          display_name: input.displayName.trim(),
+          color: input.color,
+          style_border: input.styleBorder,
+          allow_style_editors: input.allowStyleEditors,
+        })
         .eq('calendar_id', calendar.id)
         .eq('user_id', user.id)
       if (updateError) {
@@ -528,6 +715,32 @@ function App() {
       setError(`Impossibile aggiornare il profilo: ${readableError(updateError)}`)
       return false
     }
+  }
+
+  const updateMemberAppearance = async (
+    targetUserId: string,
+    color: MemberColor,
+    styleBorder: CalendarMember['style_border'],
+  ) => {
+    if (!supabase || !calendar || !user) return
+    setError('')
+    const { data: updated, error: updateError } = await supabase
+      .from('calendar_members')
+      .update({ color, style_border: styleBorder })
+      .eq('calendar_id', calendar.id)
+      .eq('user_id', targetUserId)
+      .select('user_id')
+      .maybeSingle()
+    if (updateError) {
+      setError(`Impossibile aggiornare l’aspetto del membro: ${updateError.message}`)
+      return
+    }
+    if (!updated) {
+      setError('Aspetto non aggiornato: il membro non ha consentito le modifiche degli editor.')
+      return
+    }
+    await loadCalendar(user)
+    setNotice('Aspetto del calendario aggiornato.')
   }
 
   const manageMember = async (member: CalendarMember, remove: boolean) => {
@@ -650,7 +863,7 @@ function App() {
             ['profile', 'Profilo'],
           ] as const).map(([value, label]) => <button key={value} className={`filter-row ${section === value ? 'filter-selected' : ''}`} onClick={() => { setSection(value); setSidebarOpen(false) }}>{label}</button>)}
         </nav>
-        {section === 'calendar' && <button className="create-button" onClick={() => openNewItem(date)} disabled={!canEdit}>
+        {section === 'calendar' && <button className="create-button" onClick={() => openNewItem(date)}>
           <Plus size={19} strokeWidth={2.2} />
           <span>Crea</span>
         </button>}
@@ -695,7 +908,31 @@ function App() {
             <span>Lezioni</span>
           </button>
         </details>}
-
+        {section === 'calendar' && activeViewPreferences && <details className="sidebar-section calendar-view-settings">
+          <summary className="section-heading">La mia visualizzazione</summary>
+          <label className="calendar-search"><Tag size={14} /><input value={filterText} onChange={(event) => setFilterText(event.target.value)} placeholder="Cerca tag, titolo o descrizione" /></label>
+          <strong className="settings-subheading">Aspetto per categoria</strong>
+          {itemTypes.map((type) => {
+            const style = activeViewPreferences.category_styles?.[type] ?? defaultCategoryStyles[type]
+            return <div className="category-style-row" key={type}>
+              <span>{itemLabels[type]}</span>
+              <select aria-label={`Colore categoria ${itemLabels[type]}`} value={style.color} onChange={(event) => {
+                if (isMemberColor(event.target.value)) updateCategoryStyle(type, { color: event.target.value })
+              }}>
+                {memberColorOptions.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+              <select aria-label={`Texture categoria ${itemLabels[type]}`} value={style.texture} onChange={(event) => {
+                if (isEventTexture(event.target.value)) updateCategoryStyle(type, { texture: event.target.value })
+              }}>
+                {eventTextures.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+            </div>
+          })}
+          <strong className="settings-subheading">Eventi nascosti</strong>
+          {items.filter((item) => activeViewPreferences.hidden_item_ids.includes(item.id)).length
+            ? items.filter((item) => activeViewPreferences.hidden_item_ids.includes(item.id)).map((item) => <button key={item.id} className="hidden-event-row" onClick={() => toggleHiddenItem(item.id)}><Eye size={14} /><span>{item.title}</span></button>)
+            : <span className="settings-empty">Nessun evento nascosto.</span>}
+        </details>}
         <details className="sidebar-section people-section" open>
           <summary className="section-heading">Persone ({members.length})</summary>
           <div className="people-section-head">
@@ -716,16 +953,25 @@ function App() {
           </button>
           {members.map((member) => (
             <div key={member.user_id}>
-            <button
-              className={`filter-row person-filter-row ${memberFilter === member.user_id ? 'filter-selected' : ''}`}
-              onClick={() => setMemberFilter(member.user_id)}
-              title={`Mostra gli elementi assegnati a ${memberDisplayName(member)}`}
-            >
-              <MemberAvatar member={member} mii={profiles[member.user_id]?.avatar} small />
-              <span className="member-row-name">{memberDisplayName(member)}</span>
-              {member.user_id === user.id && <span className="member-you">Tu</span>}
-            </button>
-            <small>{member.role === 'owner' ? 'Amministratore' : member.can_edit ? 'Può modificare' : 'Sola lettura'}</small>
+            <div className="person-filter-controls">
+              <button
+                className={`filter-row person-filter-row ${memberFilter === member.user_id ? 'filter-selected' : ''}`}
+                onClick={() => setMemberFilter(member.user_id)}
+                title={`Mostra gli elementi assegnati a ${memberDisplayName(member)}`}
+              >
+                <MemberAvatar member={member} mii={profiles[member.user_id]?.avatar} small />
+                <span className="member-row-name">{memberDisplayName(member)}</span>
+                {member.user_id === user.id && <span className="member-you">Tu</span>}
+              </button>
+              {section === 'calendar' && activeViewPreferences && <button
+                type="button"
+                className={`member-visibility-toggle ${activeViewPreferences.hidden_member_ids.includes(member.user_id) ? 'member-hidden' : ''}`}
+                aria-label={`${activeViewPreferences.hidden_member_ids.includes(member.user_id) ? 'Mostra' : 'Nascondi'} gli eventi creati da ${memberDisplayName(member)}`}
+                title={`${activeViewPreferences.hidden_member_ids.includes(member.user_id) ? 'Mostra' : 'Nascondi'} gli eventi creati da ${memberDisplayName(member)}`}
+                onClick={() => toggleHiddenMember(member.user_id)}
+              >{activeViewPreferences.hidden_member_ids.includes(member.user_id) ? <EyeOff size={15} /> : <Eye size={15} />}</button>}
+            </div>
+            <small>{member.role === 'owner' ? 'Amministratore' : member.can_edit ? 'Editor calendario' : 'Lettore · eventi personali'}</small>
             {currentMember?.role === 'owner' && member.role !== 'owner' && <div>
               <button className="text-button" onClick={() => void manageMember(member, false)}>{member.can_edit ? 'Rendi lettore' : 'Abilita modifica'}</button>
               <button className="text-button" onClick={() => void manageMember(member, true)}>Rimuovi</button>
@@ -813,6 +1059,8 @@ function App() {
               days={weekDays}
               items={draftItem ? [...selectedItems, draftItem] : selectedItems}
               members={members}
+              categoryStyles={activeViewPreferences?.category_styles ?? defaultCategoryStyles}
+              canEditItem={canEditItem}
               onCreate={openNewItem}
               onCreateTimedDraft={createTimedDraft}
               onEdit={(item) => setEditorItem(item)}
@@ -825,6 +1073,8 @@ function App() {
               date={date}
               items={selectedItems}
               members={members}
+              categoryStyles={activeViewPreferences?.category_styles ?? defaultCategoryStyles}
+              canEditItem={canEditItem}
               onCreate={openNewItem}
               onEdit={(item) => setEditorItem(item)}
               onToggleTask={toggleTask}
@@ -853,8 +1103,10 @@ function App() {
           memberships={allMembers}
           profiles={profiles}
           userId={user.id}
+          canEditCalendar={canEdit}
           saving={dataLoading}
           onSave={saveProfile}
+          onSaveMemberAppearance={updateMemberAppearance}
         />}
       </main>
 
@@ -864,7 +1116,13 @@ function App() {
           initialDate={createDay ?? date}
           members={members}
           currentUserId={user.id}
-          canEdit={canEdit}
+          canEdit={editorItem ? canEditItem(editorItem) : true}
+          canManageSharing={!editorItem || editorItem.created_by === user.id}
+          isHidden={Boolean(editorItem && activeViewPreferences?.hidden_item_ids.includes(editorItem.id))}
+          onToggleHidden={() => {
+            if (editorItem) toggleHiddenItem(editorItem.id)
+            setEditorItem(undefined)
+          }}
           onClose={() => {
             if (editorItem?.id.startsWith('draft:')) setDraftItem(null)
             setEditorItem(undefined)
@@ -1021,6 +1279,8 @@ function WeekCalendar({
   days,
   items,
   members,
+  categoryStyles,
+  canEditItem,
   onCreate,
   onCreateTimedDraft,
   onEdit,
@@ -1030,6 +1290,8 @@ function WeekCalendar({
   days: Date[]
   items: CalendarItem[]
   members: CalendarMember[]
+  categoryStyles: CalendarViewPreferences['category_styles']
+  canEditItem: (item: CalendarItem) => boolean
   onCreate: (day: Date) => void
   onCreateTimedDraft: (day: Date, minuteOfDay: number) => void
   onEdit: (item: CalendarItem) => void
@@ -1048,7 +1310,7 @@ function WeekCalendar({
       <div className="all-day-row">
         <div className="all-day-label">Tutto<br />il giorno</div>
         {days.map((day) => <div className="all-day-cell" key={day.toISOString()} onDoubleClick={() => onCreate(day)}>
-          {allDayItems.filter((item) => isSameDay(parseISO(item.starts_at), day)).map((item) => <CalendarItemChip key={item.id} item={item} members={members} onEdit={onEdit} onToggleTask={onToggleTask} compact />)}
+          {allDayItems.filter((item) => isSameDay(parseISO(item.starts_at), day)).map((item) => <CalendarItemChip key={item.id} item={item} members={members} categoryStyles={categoryStyles} canEditItem={canEditItem} onEdit={onEdit} onToggleTask={onToggleTask} compact />)}
         </div>)}
       </div>
       <div className="week-scroll">
@@ -1089,7 +1351,8 @@ function WeekCalendar({
                 const startTime = startsToday ? startsAt : dayStart
                 const endTime = endsAt >= dayEnd ? dayEnd : endsAt
                 const height = Math.max(15, segmentEndMinute - segmentStartMinute) / 60 * 64
-                const assignee = members.find((member) => member.user_id === item.assignee_id)
+                const person = members.find((member) => member.user_id === (item.assignee_id ?? item.created_by))
+                  ?? members.find((member) => member.user_id === item.created_by)
                 return <TimedCalendarEvent
                   key={item.id}
                   item={item}
@@ -1098,8 +1361,10 @@ function WeekCalendar({
                   height={height}
                   startLabel={format(startTime, 'HH:mm')}
                   endLabel={endsAt >= dayEnd ? '24:00' : format(endTime, 'HH:mm')}
-                  borderColor={assignee ? MEMBER_COLORS[assignee.color] : undefined}
-                  canMove={startsToday}
+                  categoryStyle={categoryStyles?.[item.item_type] ?? defaultCategoryStyles[item.item_type]}
+                  borderColor={person ? MEMBER_COLORS[person.color] : undefined}
+                  personBorder={person?.style_border ?? 'solid'}
+                  canMove={startsToday && canEditItem(item)}
                   onEdit={onEdit}
                   onUpdateTime={onUpdateTime}
                 />
@@ -1130,9 +1395,11 @@ function TimedCalendarEvent({
   day,
   top,
   height,
+  categoryStyle,
   startLabel,
   endLabel,
   borderColor,
+  personBorder,
   canMove,
   onEdit,
   onUpdateTime,
@@ -1141,9 +1408,11 @@ function TimedCalendarEvent({
   day: Date
   top: number
   height: number
+  categoryStyle: CategoryAppearance
   startLabel: string
   endLabel: string
   borderColor?: string
+  personBorder: CalendarMember['style_border']
   canMove: boolean
   onEdit: (item: CalendarItem) => void
   onUpdateTime: (item: CalendarItem, startsAt: Date, endsAt: Date) => Promise<void>
@@ -1233,15 +1502,19 @@ function TimedCalendarEvent({
   const timeLabel = preview
     ? `${format(startsAt, 'HH:mm')} – ${wallMinutesFromDay(day, endsAt) >= 1440 ? '24:00' : format(endsAt, 'HH:mm')}`
     : `${startLabel} – ${endLabel}`
+  const palette = itemPalettes[categoryStyle.color]
 
   return <div
-    className={`week-event event-${item.item_type} ${item.id.startsWith('draft:') ? 'week-event-draft' : ''} ${preview ? 'week-event-dragging' : ''}`}
+    className={`week-event event-${item.item_type} event-texture-${categoryStyle.texture} event-person-border-${personBorder} ${item.id.startsWith('draft:') ? 'week-event-draft' : ''} ${preview ? 'week-event-dragging' : ''}`}
     style={{
       top: `${preview ? wallMinutesFromDay(day, preview.startsAt) / 60 * 64 : top}px`,
       height: `${preview ? (wallMinutesFromDay(day, preview.endsAt) - wallMinutesFromDay(day, preview.startsAt)) / 60 * 64 : height}px`,
-      borderLeftColor: borderColor,
+      borderLeftColor: borderColor ?? palette.foreground,
+      backgroundColor: palette.background,
+      color: palette.foreground,
+      borderLeftStyle: personBorder,
     }}
-    title={`${item.title}, ${startLabel}–${endLabel}. Trascina per spostare; trascina i bordi per cambiare la durata.`}
+    title={`${item.title}${item.tags?.length ? ` · ${item.tags.map((tag) => `#${tag}`).join(' ')}` : ''}, ${startLabel}–${endLabel}.`}
     role="group"
     aria-label={`${item.title}, ${startLabel}–${endLabel}`}
     onPointerDown={(event) => beginGesture(event, 'move')}
@@ -1253,6 +1526,7 @@ function TimedCalendarEvent({
     <button type="button" className="event-resize-handle event-resize-start" aria-label="Bordo superiore: anticipa di 15 minuti; trascina per ridimensionare" onPointerDown={(event) => beginGesture(event, 'start')} onClick={(event) => adjustEdge('start', event)} />
     <button type="button" className="week-event-title" onClick={(event) => { event.stopPropagation(); selectEvent() }}>{item.title}</button>
     <span className="week-event-time">{timeLabel}{item.id.startsWith('draft:') ? ' · bozza' : ''}</span>
+    {item.tags?.length > 0 && <span className="week-event-tags">{item.tags.slice(0, 2).map((tag) => `#${tag}`).join(' ')}</span>}
     <button type="button" className="event-resize-handle event-resize-end" aria-label="Bordo inferiore: allunga di 15 minuti; trascina per ridimensionare" onPointerDown={(event) => beginGesture(event, 'end')} onClick={(event) => adjustEdge('end', event)} />
   </div>
 }
@@ -1262,6 +1536,8 @@ function MonthCalendar({
   date,
   items,
   members,
+  categoryStyles,
+  canEditItem,
   onCreate,
   onEdit,
   onToggleTask,
@@ -1270,6 +1546,8 @@ function MonthCalendar({
   date: Date
   items: CalendarItem[]
   members: CalendarMember[]
+  categoryStyles: CalendarViewPreferences['category_styles']
+  canEditItem: (item: CalendarItem) => boolean
   onCreate: (day: Date) => void
   onEdit: (item: CalendarItem) => void
   onToggleTask: (item: CalendarItem) => void
@@ -1282,7 +1560,7 @@ function MonthCalendar({
           <div key={day.toISOString()} className={`month-cell ${!isSameMonth(day, date) ? 'month-cell-muted' : ''} ${isToday(day) ? 'month-cell-today' : ''}`} onDoubleClick={() => onCreate(day)}>
             <div className="month-cell-top"><button className={`month-date ${isToday(day) ? 'month-date-today' : ''}`} onClick={() => onCreate(day)}>{format(day, 'd')}</button><button className="month-add" onClick={() => onCreate(day)} aria-label={`Aggiungi il ${format(day, 'd MMMM', { locale: it })}`}><Plus size={14} /></button></div>
             <div className="month-items">
-              {items.filter((item) => isSameDay(parseISO(item.starts_at), day)).slice(0, 4).map((item) => <CalendarItemChip key={item.id} item={item} members={members} onEdit={onEdit} onToggleTask={onToggleTask} compact />)}
+              {items.filter((item) => isSameDay(parseISO(item.starts_at), day)).slice(0, 4).map((item) => <CalendarItemChip key={item.id} item={item} members={members} categoryStyles={categoryStyles} canEditItem={canEditItem} onEdit={onEdit} onToggleTask={onToggleTask} compact />)}
               {items.filter((item) => isSameDay(parseISO(item.starts_at), day)).length > 4 && <span className="more-items">+ altri</span>}
             </div>
           </div>
@@ -1295,29 +1573,38 @@ function MonthCalendar({
 function CalendarItemChip({
   item,
   members,
+  categoryStyles,
+  canEditItem,
   onEdit,
   onToggleTask,
   compact = false,
 }: {
   item: CalendarItem
   members: CalendarMember[]
+  categoryStyles: CalendarViewPreferences['category_styles']
+  canEditItem: (item: CalendarItem) => boolean
   onEdit: (item: CalendarItem) => void
   onToggleTask: (item: CalendarItem) => void
   compact?: boolean
 }) {
-  const assignee = members.find((member) => member.user_id === item.assignee_id)
+  const person = members.find((member) => member.user_id === (item.assignee_id ?? item.created_by))
+    ?? members.find((member) => member.user_id === item.created_by)
+  const categoryStyle = categoryStyles?.[item.item_type] ?? defaultCategoryStyles[item.item_type]
+  const palette = itemPalettes[categoryStyle.color]
   return (
     <div
-      className={`item-chip event-${item.item_type} ${item.completed ? 'item-completed' : ''} ${compact ? 'item-chip-compact' : ''}`}
-      title={assignee ? `${item.title} · ${memberDisplayName(assignee)}` : item.title}
+      className={`item-chip event-${item.item_type} event-texture-${categoryStyle.texture} event-person-border-${person?.style_border ?? 'solid'} ${item.completed ? 'item-completed' : ''} ${compact ? 'item-chip-compact' : ''}`}
+      style={{ backgroundColor: palette.background, color: palette.foreground, borderLeftColor: person ? MEMBER_COLORS[person.color] : palette.foreground }}
+      title={`${item.title}${person ? ` · ${memberDisplayName(person)}` : ''}${item.tags?.length ? ` · ${item.tags.map((tag) => `#${tag}`).join(' ')}` : ''}`}
     >
       {item.item_type === 'task' ? (
-        <button className="task-check" onClick={(event) => { event.stopPropagation(); void onToggleTask(item) }} aria-label={item.completed ? 'Segna come da fare' : 'Segna come completata'}>
+        <button className="task-check" disabled={!canEditItem(item)} onClick={(event) => { event.stopPropagation(); void onToggleTask(item) }} aria-label={item.completed ? 'Segna come da fare' : 'Segna come completata'}>
           {item.completed && <Check size={11} />}
         </button>
       ) : <span className="item-time-dot" />}
-      {assignee && <span className="assigned-color-dot" style={{ backgroundColor: MEMBER_COLORS[assignee.color] }} />}
+      {person && <span className="assigned-color-dot" style={{ backgroundColor: MEMBER_COLORS[person.color] }} />}
       <button className="item-title" onClick={() => onEdit(item)} title={item.title}>{item.title}</button>
+      {item.tags?.[0] && <span className="item-tag-label">#{item.tags[0]}</span>}
     </div>
   )
 }
@@ -1341,7 +1628,10 @@ function ItemEditor({
   members,
   currentUserId,
   canEdit,
+  canManageSharing,
+  isHidden,
   onClose,
+  onToggleHidden,
   onSave,
   onDelete,
 }: {
@@ -1350,8 +1640,23 @@ function ItemEditor({
   members: CalendarMember[]
   currentUserId: string
   canEdit: boolean
+  canManageSharing: boolean
+  isHidden: boolean
   onClose: () => void
-  onSave: (form: { title: string; description: string; item_type: CalendarItemType; starts_at: string; ends_at: string; all_day: boolean; assignee_id: string | null; visibility: 'everyone' | 'selected'; visible_to: string[] }) => Promise<boolean>
+  onToggleHidden: () => void
+  onSave: (form: {
+    title: string
+    description: string
+    item_type: CalendarItemType
+    starts_at: string
+    ends_at: string
+    all_day: boolean
+    assignee_id: string | null
+    visibility: CalendarItem['visibility']
+    visible_to: string[]
+    editable_by: string[]
+    tags: string[]
+  }) => Promise<boolean>
   onDelete?: () => void
 }) {
   const defaults = getDefaultTimes(initialDate)
@@ -1363,8 +1668,10 @@ function ItemEditor({
   const [endsAt, setEndsAt] = useState(item ? localDateTime(parseISO(item.ends_at)) : defaults.ends_at)
   const [allDay, setAllDay] = useState(item?.all_day ?? false)
   const [assigneeId, setAssigneeId] = useState(item ? item.assignee_id ?? '' : currentUserId)
-  const [visibility, setVisibility] = useState<'everyone' | 'selected'>(item?.visibility ?? 'everyone')
+  const [visibility, setVisibility] = useState<CalendarItem['visibility']>(item?.visibility ?? 'everyone')
   const [visibleTo, setVisibleTo] = useState<string[]>(item?.visible_to ?? [])
+  const [editableBy, setEditableBy] = useState<string[]>(item?.editable_by ?? [])
+  const [tagText, setTagText] = useState((item?.tags ?? []).join(', '))
   const [validationError, setValidationError] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -1375,10 +1682,27 @@ function ItemEditor({
       setValidationError('L’orario di fine deve essere successivo all’orario di inizio.')
       return
     }
+    const tags = [...new Set(tagText.split(',').map((tag) => tag.trim()).filter(Boolean))]
+    if (tags.length > 12 || tags.some((tag) => tag.length > 32)) {
+      setValidationError('Inserisci al massimo 12 tag, ciascuno da 32 caratteri.')
+      return
+    }
     setValidationError('')
     setSaving(true)
-    const recipients = [...new Set([...visibleTo, currentUserId])]
-    const saved = await onSave({ title, description, item_type: itemType, starts_at: startsAt, ends_at: endsAt, all_day: allDay || itemType === 'task', assignee_id: assigneeId || null, visibility, visible_to: recipients })
+    const recipients = visibility === 'selected' ? [...new Set([...visibleTo, currentUserId])] : []
+    const saved = await onSave({
+      title,
+      description,
+      item_type: itemType,
+      starts_at: startsAt,
+      ends_at: endsAt,
+      all_day: allDay || itemType === 'task',
+      assignee_id: assigneeId || null,
+      visibility,
+      visible_to: recipients,
+      editable_by: canManageSharing ? editableBy : item?.editable_by ?? [],
+      tags,
+    })
     setSaving(false)
     if (saved) onClose()
   }
@@ -1399,13 +1723,25 @@ function ItemEditor({
           {itemType !== 'task' && <label className="modal-field"><span><Clock3 size={16} /> Fine</span><input type="datetime-local" value={endsAt} onChange={(event) => { setEndsAt(event.target.value); setValidationError('') }} required /></label>}
           {itemType !== 'task' && <label className="checkbox-field"><input type="checkbox" checked={allDay} onChange={(event) => setAllDay(event.target.checked)} /><span>Tutto il giorno</span></label>}
           <label className="description-field"><span>Assegnato a</span><select value={assigneeId} onChange={(event) => setAssigneeId(event.target.value)}><option value="">Nessuno</option>{members.map((member) => <option key={member.user_id} value={member.user_id}>{memberDisplayName(member)}</option>)}</select></label>
-          <label className="description-field"><span>Visibilità</span><select value={visibility} onChange={(event) => setVisibility(event.target.value === 'selected' ? 'selected' : 'everyone')}><option value="everyone">Tutti i membri</option><option value="selected">Solo persone selezionate</option></select></label>
-          {visibility === 'selected' && <div>
-            <p>Tu e il creatore vedete sempre questo elemento. Seleziona altre persone:</p>
-            {members.filter((member) => member.user_id !== currentUserId && member.user_id !== item?.created_by).map((member) => <label className="checkbox-field" key={member.user_id}><input type="checkbox" checked={visibleTo.includes(member.user_id)} onChange={(event) => setVisibleTo((current) => event.target.checked ? [...current, member.user_id] : current.filter((id) => id !== member.user_id))} /><span>{memberDisplayName(member)}</span></label>)}
-          </div>}
+          <label className="description-field"><span>Tag <small>Separati da virgola, max 12</small></span><input value={tagText} onChange={(event) => setTagText(event.target.value)} placeholder="es. famiglia, viaggio, urgente" maxLength={420} /></label>
           <label className="description-field"><span>Descrizione <small>Facoltativa</small></span><textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Aggiungi dettagli..." maxLength={1000} /></label>
           </fieldset>
+          <fieldset className="sharing-fieldset" disabled={!canManageSharing || !canEdit}>
+            <legend>Condivisione e autorizzazioni</legend>
+            {!canManageSharing && <p>Solo il creatore può cambiare la condivisione e scegliere chi può modificare.</p>}
+            <label className="description-field"><span>Chi può vedere?</span><select value={visibility} onChange={(event) => {
+              const value = event.target.value
+              if (value === 'private' || value === 'everyone' || value === 'selected') setVisibility(value)
+            }}><option value="private">Personale: solo tu</option><option value="everyone">Condiviso con tutti i membri</option><option value="selected">Condiviso con persone selezionate</option></select></label>
+            {visibility === 'selected' && <div>
+              <p>Tu vedi sempre l’evento. Scegli gli altri destinatari:</p>
+              {members.filter((member) => member.user_id !== currentUserId && member.user_id !== item?.created_by).map((member) => <label className="checkbox-field" key={member.user_id}><input type="checkbox" checked={visibleTo.includes(member.user_id)} onChange={(event) => setVisibleTo((current) => event.target.checked ? [...current, member.user_id] : current.filter((id) => id !== member.user_id))} /><span>{memberDisplayName(member)}</span></label>)}
+            </div>}
+            <div className="description-field"><span>Chi può modificare?</span><p>Tu puoi sempre modificare il tuo evento. Gli altri membri restano in sola lettura salvo autorizzazione esplicita:</p>
+              {members.filter((member) => member.user_id !== currentUserId && member.user_id !== item?.created_by).map((member) => <label className="checkbox-field" key={member.user_id}><input type="checkbox" checked={editableBy.includes(member.user_id)} onChange={(event) => setEditableBy((current) => event.target.checked ? [...current, member.user_id] : current.filter((id) => id !== member.user_id))} /><span>{memberDisplayName(member)}</span></label>)}
+            </div>
+          </fieldset>
+          {item && !isDraft && <button type="button" className="personal-event-toggle" onClick={onToggleHidden}>{isHidden ? <Eye size={15} /> : <EyeOff size={15} />}{isHidden ? 'Mostra nel mio calendario' : 'Nascondi solo nel mio calendario'}</button>}
           {validationError && <p className="form-message form-error">{validationError}</p>}
           <div className="modal-footer">{onDelete && canEdit ? <button type="button" className="delete-button" onClick={onDelete}><Trash2 size={16} /> Elimina</button> : <span />}
             <div><button type="button" className="cancel-button" onClick={onClose}>{canEdit ? 'Annulla' : 'Chiudi'}</button>{canEdit && <button className="primary-button save-button" type="submit" disabled={saving}>{saving ? <LoaderCircle className="loading-icon" size={17} /> : item && !isDraft ? 'Salva modifiche' : 'Crea evento'}</button>}</div>

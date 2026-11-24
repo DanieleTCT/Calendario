@@ -276,16 +276,71 @@ $$;
 -- Existing members retain their editing rights; newly invited members start as viewers.
 alter table public.calendar_members add column if not exists can_edit boolean not null default true;
 alter table public.calendar_members alter column can_edit set default false;
+alter table public.calendar_members add column if not exists style_border text not null default 'solid';
+alter table public.calendar_members add column if not exists allow_style_editors boolean not null default true;
+do $$
+begin
+  alter table public.calendar_members add constraint calendar_members_style_border_check
+    check (style_border in ('solid', 'dashed', 'double'));
+exception when duplicate_object then null;
+end;
+$$;
+grant update (style_border, allow_style_editors) on public.calendar_members to authenticated;
 alter table public.calendar_items add column if not exists visibility text not null default 'everyone';
 alter table public.calendar_items add column if not exists visible_to uuid[] not null default '{}';
+alter table public.calendar_items add column if not exists editable_by uuid[] not null default '{}';
+alter table public.calendar_items add column if not exists tags text[] not null default '{}';
 alter table public.calendar_items add column if not exists source_provider text;
 alter table public.calendar_items add column if not exists source_uid text;
 
+alter table public.calendar_items drop constraint if exists calendar_items_visibility_check;
+alter table public.calendar_items add constraint calendar_items_visibility_check
+  check (visibility in ('private', 'everyone', 'selected'));
 do $$
 begin
-  alter table public.calendar_items add constraint calendar_items_visibility_check
-    check (visibility in ('everyone', 'selected'));
+  alter table public.calendar_items add constraint calendar_items_tags_check
+    check (cardinality(tags) <= 12 and array_position(tags, null) is null);
 exception when duplicate_object then null;
+end;
+$$;
+
+create table if not exists public.calendar_view_preferences (
+  calendar_id uuid not null references public.calendars(id) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  hidden_item_ids uuid[] not null default '{}',
+  hidden_member_ids uuid[] not null default '{}',
+  category_styles jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(),
+  primary key (calendar_id, user_id),
+  check (cardinality(hidden_item_ids) <= 500),
+  check (cardinality(hidden_member_ids) <= 100),
+  check (jsonb_typeof(category_styles) = 'object' and octet_length(category_styles::text) <= 2048)
+);
+
+alter table public.calendar_view_preferences enable row level security;
+revoke all on public.calendar_view_preferences from public, anon, authenticated;
+grant select, insert, update, delete on public.calendar_view_preferences to authenticated;
+
+drop policy if exists "Users read their calendar view preferences" on public.calendar_view_preferences;
+create policy "Users read their calendar view preferences" on public.calendar_view_preferences for select to authenticated
+using (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Users create their calendar view preferences" on public.calendar_view_preferences;
+create policy "Users create their calendar view preferences" on public.calendar_view_preferences for insert to authenticated
+with check (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Users update their calendar view preferences" on public.calendar_view_preferences;
+create policy "Users update their calendar view preferences" on public.calendar_view_preferences for update to authenticated
+using (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id))
+with check (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+drop policy if exists "Users delete their calendar view preferences" on public.calendar_view_preferences;
+create policy "Users delete their calendar view preferences" on public.calendar_view_preferences for delete to authenticated
+using (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+
+do $$
+begin
+  alter publication supabase_realtime add table public.calendar_view_preferences;
+exception
+  when duplicate_object then null;
+  when undefined_object then null;
 end;
 $$;
 
@@ -325,14 +380,82 @@ create or replace function public.can_view_calendar_item(
 returns boolean language sql stable security definer set search_path = ''
 as $$
   select public.is_current_user_calendar_member(p_calendar_id)
-    and (p_visibility = 'everyone' or p_created_by = (select auth.uid())
-      or (select auth.uid()) = any(p_visible_to));
+    and case
+      when p_visibility = 'private' then p_created_by = (select auth.uid())
+      when p_visibility = 'selected' then p_created_by = (select auth.uid())
+        or (select auth.uid()) = any(p_visible_to)
+      else p_visibility = 'everyone'
+    end;
+$$;
+
+create or replace function public.can_edit_calendar_item(
+  p_calendar_id uuid, p_created_by uuid, p_editable_by uuid[]
+)
+returns boolean language sql stable security definer set search_path = ''
+as $$
+  select public.is_current_user_calendar_member(p_calendar_id)
+    and (p_created_by = (select auth.uid()) or (select auth.uid()) = any(p_editable_by));
+$$;
+
+create or replace function public.can_edit_member_style(
+  p_calendar_id uuid, p_user_id uuid, p_allow_style_editors boolean
+)
+returns boolean language sql stable security definer set search_path = ''
+as $$
+  select p_allow_style_editors
+    and p_user_id <> (select auth.uid())
+    and public.can_edit_calendar(p_calendar_id);
 $$;
 
 revoke all on function public.can_edit_calendar(uuid) from public;
 revoke all on function public.can_view_calendar_item(uuid, uuid, text, uuid[]) from public;
+revoke all on function public.can_edit_calendar_item(uuid, uuid, uuid[]) from public;
+revoke all on function public.can_edit_member_style(uuid, uuid, boolean) from public;
 grant execute on function public.can_edit_calendar(uuid) to authenticated;
 grant execute on function public.can_view_calendar_item(uuid, uuid, text, uuid[]) to authenticated;
+grant execute on function public.can_edit_calendar_item(uuid, uuid, uuid[]) to authenticated;
+grant execute on function public.can_edit_member_style(uuid, uuid, boolean) to authenticated;
+
+drop policy if exists "Users can update their own membership profile" on public.calendar_members;
+drop policy if exists "Users update member profiles and permitted appearance" on public.calendar_members;
+create policy "Users update member profiles and permitted appearance" on public.calendar_members for update to authenticated
+using (
+  (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id))
+  or public.can_edit_member_style(calendar_id, user_id, allow_style_editors)
+)
+with check (
+  (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id))
+  or public.can_edit_member_style(calendar_id, user_id, allow_style_editors)
+);
+
+create or replace function public.check_calendar_member_style_access()
+returns trigger language plpgsql security definer set search_path = ''
+as $$
+begin
+  if tg_op = 'UPDATE' and new.user_id <> (select auth.uid()) then
+    if new.calendar_id is distinct from old.calendar_id or new.user_id is distinct from old.user_id
+      or new.display_name is distinct from old.display_name
+      or new.allow_style_editors is distinct from old.allow_style_editors then
+      raise exception 'Non puoi modificare questo profilo o le sue autorizzazioni.';
+    end if;
+    if (new.color is distinct from old.color or new.style_border is distinct from old.style_border)
+      and not public.can_edit_member_style(old.calendar_id, old.user_id, old.allow_style_editors) then
+      raise exception 'Questo membro non consente agli editor di modificare il suo aspetto.';
+    end if;
+    if (new.role is distinct from old.role or new.can_edit is distinct from old.can_edit)
+      and not exists (
+        select 1 from public.calendar_members
+        where calendar_id = old.calendar_id and user_id = (select auth.uid()) and role = 'owner'
+      ) then
+      raise exception 'Solo il proprietario può modificare i permessi di un membro.';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists check_calendar_member_style_access on public.calendar_members;
+create trigger check_calendar_member_style_access before update on public.calendar_members
+for each row execute function public.check_calendar_member_style_access();
 
 create or replace function public.check_calendar_item_access()
 returns trigger language plpgsql security definer set search_path = ''
@@ -340,6 +463,23 @@ as $$
 begin
   if tg_op = 'UPDATE' and (new.calendar_id <> old.calendar_id or new.created_by <> old.created_by) then
     raise exception 'Il calendario e il creatore non possono essere modificati.';
+  end if;
+  if tg_op = 'UPDATE' and new.created_by <> (select auth.uid())
+    and (new.visibility is distinct from old.visibility
+      or new.visible_to is distinct from old.visible_to
+      or new.editable_by is distinct from old.editable_by) then
+    if new.visibility is distinct from old.visibility
+      or not (new.visible_to <@ old.visible_to)
+      or not (new.editable_by <@ old.editable_by)
+      or not exists (
+        select 1 from public.calendar_members
+        where calendar_id = old.calendar_id and user_id = (select auth.uid()) and role = 'owner'
+      ) then
+      raise exception 'Solo il creatore può ampliare la condivisione o le autorizzazioni dell’evento.';
+    end if;
+  end if;
+  if new.visibility = 'private' and cardinality(new.visible_to) > 0 then
+    raise exception 'Un evento personale non può avere destinatari condivisi.';
   end if;
   if exists (
     select 1 from unnest(new.visible_to) as recipient(user_id)
@@ -349,6 +489,21 @@ begin
     )
   ) then
     raise exception 'La visibilità può includere solo membri del calendario.';
+  end if;
+  if exists (
+    select 1 from unnest(new.editable_by) as editor(user_id)
+    where editor.user_id is null or editor.user_id = new.created_by or not exists (
+      select 1 from public.calendar_members
+      where calendar_id = new.calendar_id and user_id = editor.user_id
+    )
+  ) then
+    raise exception 'Le autorizzazioni di modifica possono includere solo altri membri del calendario.';
+  end if;
+  if cardinality(new.tags) > 12 or exists (
+    select 1 from unnest(new.tags) as tag(value)
+    where char_length(btrim(tag.value)) not between 1 and 32
+  ) then
+    raise exception 'Un evento può avere al massimo 12 tag, ciascuno da 1 a 32 caratteri.';
   end if;
   return new;
 end;
@@ -364,16 +519,16 @@ using (public.can_view_calendar_item(calendar_id, created_by, visibility, visibl
 
 drop policy if exists "Members can create calendar items" on public.calendar_items;
 create policy "Members can create calendar items" on public.calendar_items for insert to authenticated
-with check (created_by = (select auth.uid()) and public.can_edit_calendar(calendar_id));
+with check (created_by = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
 
 drop policy if exists "Members can update calendar items" on public.calendar_items;
 create policy "Members can update calendar items" on public.calendar_items for update to authenticated
-using (public.can_edit_calendar(calendar_id) and public.can_view_calendar_item(calendar_id, created_by, visibility, visible_to))
-with check (public.can_edit_calendar(calendar_id) and public.can_view_calendar_item(calendar_id, created_by, visibility, visible_to));
+using (public.can_edit_calendar_item(calendar_id, created_by, editable_by))
+with check (public.can_edit_calendar_item(calendar_id, created_by, editable_by));
 
 drop policy if exists "Members can delete calendar items" on public.calendar_items;
 create policy "Members can delete calendar items" on public.calendar_items for delete to authenticated
-using (public.can_edit_calendar(calendar_id) and public.can_view_calendar_item(calendar_id, created_by, visibility, visible_to));
+using (public.can_edit_calendar_item(calendar_id, created_by, editable_by));
 
 create table if not exists public.calendar_schedule_sources (
   id uuid primary key default gen_random_uuid(),
@@ -532,7 +687,9 @@ begin
     raise exception 'Membro non trovato o non modificabile.';
   end if;
   if p_remove then
-    update public.calendar_items set visible_to = array_remove(visible_to, p_user_id)
+    update public.calendar_items
+      set visible_to = array_remove(visible_to, p_user_id),
+          editable_by = array_remove(editable_by, p_user_id)
       where calendar_id = p_calendar_id and p_user_id = any(visible_to);
     delete from public.calendar_members where calendar_id = p_calendar_id and user_id = p_user_id;
     update public.calendars set invite_code = upper(replace(gen_random_uuid()::text, '-', '')) where id = p_calendar_id;
@@ -833,7 +990,9 @@ begin
     raise exception 'Membro non trovato o non modificabile.';
   end if;
   if p_remove then
-    update public.calendar_items set visible_to = array_remove(visible_to, p_user_id)
+    update public.calendar_items
+      set visible_to = array_remove(visible_to, p_user_id),
+          editable_by = array_remove(editable_by, p_user_id)
       where calendar_id = p_calendar_id and p_user_id = any(visible_to);
     delete from public.calendar_members where calendar_id = p_calendar_id and user_id = p_user_id;
     perform public.rotate_calendar_invites(p_calendar_id);
@@ -1008,12 +1167,14 @@ alter table public.shared_playback
   add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
 alter table public.user_profiles
   add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
+alter table public.calendar_view_preferences
+  add column if not exists sync_updated_at timestamptz not null default clock_timestamp();
 
 create table if not exists public.sync_tombstones (
   table_name text not null check (table_name in (
     'calendars', 'calendar_members', 'calendar_items', 'watch_sessions',
     'watch_participants', 'watch_items', 'watch_votes', 'shared_playback',
-    'user_profiles'
+    'user_profiles', 'calendar_view_preferences'
   )),
   row_key jsonb not null,
   calendar_id uuid,
@@ -1021,6 +1182,13 @@ create table if not exists public.sync_tombstones (
   deleted_at timestamptz not null default clock_timestamp(),
   primary key (table_name, row_key)
 );
+alter table public.sync_tombstones drop constraint if exists sync_tombstones_table_name_check;
+alter table public.sync_tombstones add constraint sync_tombstones_table_name_check
+  check (table_name in (
+    'calendars', 'calendar_members', 'calendar_items', 'watch_sessions',
+    'watch_participants', 'watch_items', 'watch_votes', 'shared_playback',
+    'user_profiles', 'calendar_view_preferences'
+  ));
 
 alter table public.sync_tombstones enable row level security;
 revoke all on public.sync_tombstones from anon, authenticated;
@@ -1062,6 +1230,7 @@ begin
     when 'watch_votes' then jsonb_build_object('session_id', old_row->'session_id', 'item_id', old_row->'item_id', 'user_id', old_row->'user_id')
     when 'shared_playback' then jsonb_build_object('calendar_id', old_row->'calendar_id')
     when 'user_profiles' then jsonb_build_object('user_id', old_row->'user_id')
+    when 'calendar_view_preferences' then jsonb_build_object('calendar_id', old_row->'calendar_id', 'user_id', old_row->'user_id')
   end;
   affected_calendar := coalesce(
     nullif(old_row->>'calendar_id', '')::uuid,
@@ -1092,7 +1261,7 @@ begin
   foreach table_name in array array[
     'calendars', 'calendar_members', 'calendar_items', 'watch_sessions',
     'watch_participants', 'watch_items', 'watch_votes', 'shared_playback',
-    'user_profiles'
+    'user_profiles', 'calendar_view_preferences'
   ] loop
     execute format('drop trigger if exists touch_sync_updated_at on public.%I', table_name);
     execute format(

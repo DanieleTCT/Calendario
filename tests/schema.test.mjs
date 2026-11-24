@@ -10,6 +10,8 @@ const viewer = '00000000-0000-4000-8000-000000000003'
 const outsider = '00000000-0000-4000-8000-000000000004'
 const calendar = '10000000-0000-4000-8000-000000000001'
 const item = '20000000-0000-4000-8000-000000000001'
+const sharedItem = '20000000-0000-4000-8000-000000000002'
+const personalItem = '20000000-0000-4000-8000-000000000003'
 const session = '30000000-0000-4000-8000-000000000001'
 const choice = '40000000-0000-4000-8000-000000000001'
 const file = `${calendar}/audio.mp3`
@@ -77,16 +79,34 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     await assert.rejects(() => db.query('select public.get_calendar_invite_code($1)', [calendar]))
     await assert.rejects(() => db.query('select public.get_calendar_edit_invite_code($1)', [calendar]))
     await assert.rejects(() => db.query('select invite_code from public.calendars where id = $1', [calendar]))
-    await assert.rejects(() => db.query(
-      'insert into public.calendar_items (calendar_id, title, item_type, starts_at, ends_at, created_by) values ($1, $2, $3, now(), now(), $4)',
-      [calendar, 'Vietato', 'event', viewer],
-    ))
+    await db.query(`insert into public.calendar_items
+      (id, calendar_id, title, item_type, starts_at, ends_at, created_by, visibility)
+      values ($1, $2, 'Solo mio', 'event', now(), now(), $3, 'private')`,
+    [personalItem, calendar, viewer])
+    assert.equal((await rows('select id from public.calendar_items where created_by = $1', [viewer])).length, 1)
     await as(owner)
     await db.query('select public.manage_calendar_member($1, $2, true, false)', [calendar, editor])
+    await as(editor)
+    await db.query("update public.calendar_members set style_border = 'dashed' where calendar_id = $1 and user_id = $2", [calendar, viewer])
+    await assert.rejects(() => db.query("update public.calendar_members set display_name = 'Falsificato' where calendar_id = $1 and user_id = $2", [calendar, viewer]))
+    await as(owner)
     await db.query(`insert into public.calendar_items
-      (id, calendar_id, title, item_type, starts_at, ends_at, created_by, visibility, visible_to)
-      values ($1, $2, 'Privato', 'event', now(), now(), $3, 'selected', array[$4::uuid])`,
+      (id, calendar_id, title, item_type, starts_at, ends_at, created_by, visibility, visible_to, tags)
+      values ($1, $2, 'Selezionato', 'event', now(), now(), $3, 'selected', array[$4::uuid], array['lavoro'])`,
     [item, calendar, owner, editor])
+    await db.query(`insert into public.calendar_items
+      (id, calendar_id, title, item_type, starts_at, ends_at, created_by, visibility, tags)
+      values ($1, $2, 'Condiviso', 'event', now(), now(), $3, 'everyone', array['famiglia'])`,
+    [sharedItem, calendar, owner])
+    await as(editor)
+    assert.equal((await rows('select title from public.calendar_items where id = $1', [item]))[0].title, 'Selezionato')
+    assert.equal((await rows('update public.calendar_items set title = $1 where id = $2 returning id', ['Modifica negata', item])).length, 0)
+    await as(owner)
+    await db.query('update public.calendar_items set editable_by = array[$1::uuid] where id = $2', [editor, item])
+    await as(editor)
+    await db.query('update public.calendar_items set title = $1 where id = $2', ['Modificabile', item])
+    await assert.rejects(() => db.query('update public.calendar_items set editable_by = array[$1::uuid] where id = $2', [viewer, item]))
+    await as(owner)
     await db.query('insert into storage.objects (bucket_id, name) values ($1, $2)', ['family-shared', file])
     await db.query('insert into public.watch_sessions (id, calendar_id, name, created_by) values ($1, $2, $3, $4)', [session, calendar, 'Serata', owner])
     await assert.rejects(() => db.query("insert into public.watch_sessions (calendar_id, name, created_by, status) values ($1, 'Bypass', $2, 'finished')", [calendar, owner]))
@@ -94,11 +114,23 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     const editCode = (await rows('select public.get_calendar_edit_invite_code($1) as code', [calendar]))[0].code
 
     await as(viewer)
-    assert.equal((await rows('select id from public.calendar_items')).length, 0)
+    assert.deepEqual((await rows('select id from public.calendar_items order by id')).map((row) => row.id), [sharedItem, personalItem])
     assert.equal((await rows('select name from storage.objects')).length, 1)
+    assert.equal((await rows('select user_id from public.calendar_view_preferences')).length, 0)
+    await db.query(`insert into public.calendar_view_preferences (calendar_id, user_id, hidden_item_ids)
+      values ($1, $2, array[$3::uuid])`, [calendar, viewer, sharedItem])
+    assert.equal((await rows('select * from public.calendar_view_preferences where user_id = $1', [viewer])).length, 1)
+    await as(editor)
+    assert.equal((await rows('select * from public.calendar_view_preferences where user_id = $1', [viewer])).length, 0)
+    await assert.rejects(() => db.query('insert into public.calendar_view_preferences (calendar_id, user_id) values ($1, $2)', [calendar, viewer]))
+    await as(viewer)
     await db.query('select public.join_calendar_with_code($1)', [editCode])
     assert.equal((await rows('select can_edit from public.calendar_members where user_id = $1', [viewer]))[0].can_edit, false)
     await assert.rejects(() => db.query('insert into public.watch_items (session_id, calendar_id, title, category, created_by) values ($1, $2, $3, $4, $5)', [session, calendar, 'No', 'film', viewer]))
+    await db.query("update public.calendar_members set allow_style_editors = false where calendar_id = $1 and user_id = $2", [calendar, viewer])
+    await as(editor)
+    assert.equal((await rows("update public.calendar_members set style_border = 'dashed' where calendar_id = $1 and user_id = $2 returning user_id", [calendar, viewer])).length, 0)
+    await as(viewer)
     await assert.rejects(() => db.query('insert into storage.objects (bucket_id, name) values ($1, $2)', ['family-shared', `${calendar}/vietato`]))
     await assert.rejects(() => db.query('select public.set_shared_playback($1, $2, 0, true)', [calendar, file]))
     await db.query('insert into public.watch_participants (session_id, calendar_id, user_id) values ($1, $2, $3)', [session, calendar, viewer])
@@ -125,7 +157,7 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     await as(editor)
     assert.equal((await rows('select status from public.watch_sessions where id = $1', [session]))[0].status, 'finished')
     assert.equal((await rows('select * from public.watch_votes')).length, 2)
-    assert.equal((await rows('select id from public.calendar_items')).length, 1)
+    assert.equal((await rows('select id from public.calendar_items')).length, 2)
     const oldVersion = (await rows('select sync_updated_at from public.calendar_items where id = $1', [item]))[0].sync_updated_at
     assert.equal((await rows('update public.calendar_items set title = $1 where id = $2 returning id', ['Aggiornato', item])).length, 1)
     const newVersion = (await rows('select sync_updated_at from public.calendar_items where id = $1', [item]))[0].sync_updated_at

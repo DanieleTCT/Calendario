@@ -19,6 +19,7 @@ const syncTables = [
   'calendars',
   'calendar_members',
   'calendar_items',
+  'calendar_view_preferences',
   'watch_sessions',
   'watch_participants',
   'watch_items',
@@ -32,6 +33,7 @@ const primaryKeys: Record<SyncTable, string[]> = {
   calendars: ['id'],
   calendar_members: ['calendar_id', 'user_id'],
   calendar_items: ['id'],
+  calendar_view_preferences: ['calendar_id', 'user_id'],
   watch_sessions: ['id'],
   watch_participants: ['session_id', 'user_id'],
   watch_items: ['id'],
@@ -41,8 +43,9 @@ const primaryKeys: Record<SyncTable, string[]> = {
 
 const selectableColumns: Record<SyncTable, string[]> = {
   calendars: ['id', 'name', 'created_by', 'created_at', 'sync_updated_at'],
-  calendar_members: ['calendar_id', 'user_id', 'role', 'display_name', 'color', 'created_at', 'can_edit', 'sync_updated_at'],
-  calendar_items: ['id', 'calendar_id', 'title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'created_by', 'created_at', 'updated_at', 'visibility', 'visible_to', 'sync_updated_at'],
+  calendar_members: ['calendar_id', 'user_id', 'role', 'display_name', 'color', 'created_at', 'can_edit', 'style_border', 'allow_style_editors', 'sync_updated_at'],
+  calendar_items: ['id', 'calendar_id', 'title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'created_by', 'created_at', 'updated_at', 'visibility', 'visible_to', 'editable_by', 'tags', 'sync_updated_at'],
+  calendar_view_preferences: ['calendar_id', 'user_id', 'hidden_item_ids', 'hidden_member_ids', 'category_styles', 'updated_at', 'sync_updated_at'],
   watch_sessions: ['id', 'calendar_id', 'name', 'created_by', 'created_at', 'status', 'sync_updated_at'],
   watch_participants: ['session_id', 'calendar_id', 'user_id', 'joined_at', 'sync_updated_at'],
   watch_items: ['id', 'session_id', 'calendar_id', 'title', 'category', 'tags', 'created_by', 'created_at', 'tmdb_id', 'poster_path', 'release_date', 'sync_updated_at'],
@@ -53,7 +56,8 @@ const selectableColumns: Record<SyncTable, string[]> = {
 const insertColumns: Record<SyncTable, string[]> = {
   calendars: ['id', 'name', 'created_by'],
   calendar_members: [],
-  calendar_items: ['id', 'calendar_id', 'title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'created_by', 'visibility', 'visible_to'],
+  calendar_items: ['id', 'calendar_id', 'title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'created_by', 'visibility', 'visible_to', 'editable_by', 'tags'],
+  calendar_view_preferences: ['calendar_id', 'user_id', 'hidden_item_ids', 'hidden_member_ids', 'category_styles'],
   watch_sessions: ['id', 'calendar_id', 'name', 'created_by'],
   watch_participants: ['session_id', 'calendar_id', 'user_id'],
   watch_items: ['id', 'session_id', 'calendar_id', 'title', 'category', 'tags', 'created_by', 'tmdb_id', 'poster_path', 'release_date'],
@@ -63,8 +67,9 @@ const insertColumns: Record<SyncTable, string[]> = {
 
 const updateColumns: Record<SyncTable, string[]> = {
   calendars: ['name'],
-  calendar_members: ['display_name', 'color'],
-  calendar_items: ['title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'visibility', 'visible_to'],
+  calendar_members: ['display_name', 'color', 'style_border', 'allow_style_editors'],
+  calendar_items: ['title', 'description', 'item_type', 'starts_at', 'ends_at', 'all_day', 'completed', 'assignee_id', 'visibility', 'visible_to', 'editable_by', 'tags'],
+  calendar_view_preferences: ['hidden_item_ids', 'hidden_member_ids', 'category_styles'],
   watch_sessions: [],
   watch_participants: [],
   watch_items: ['title', 'category', 'tags', 'tmdb_id', 'poster_path', 'release_date'],
@@ -327,6 +332,8 @@ function policySql(table: SyncTable, operation: 'select' | 'update' | 'delete') 
       case 'watch_participants':
       case 'watch_items':
         return 'public.is_current_user_calendar_member(calendar_id)'
+      case 'calendar_view_preferences':
+        return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
       case 'calendar_items':
         return 'public.can_view_calendar_item(calendar_id, created_by, visibility, visible_to)'
       case 'watch_votes':
@@ -348,9 +355,11 @@ function policySql(table: SyncTable, operation: 'select' | 'update' | 'delete') 
   if (operation === 'update') {
     switch (table) {
       case 'calendar_members':
-        return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
+        return '(user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)) or public.can_edit_member_style(calendar_id, user_id, allow_style_editors)'
       case 'calendar_items':
-        return 'public.can_edit_calendar(calendar_id) and public.can_view_calendar_item(calendar_id, created_by, visibility, visible_to)'
+        return 'public.can_edit_calendar_item(calendar_id, created_by, editable_by)'
+      case 'calendar_view_preferences':
+        return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
       case 'watch_votes':
         return `user_id = auth.uid() and exists (
           select 1 from public.watch_participants p
@@ -366,7 +375,9 @@ function policySql(table: SyncTable, operation: 'select' | 'update' | 'delete') 
   }
   switch (table) {
     case 'calendar_items':
-      return 'public.can_edit_calendar(calendar_id) and public.can_view_calendar_item(calendar_id, created_by, visibility, visible_to)'
+      return 'public.can_edit_calendar_item(calendar_id, created_by, editable_by)'
+    case 'calendar_view_preferences':
+      return 'user_id = auth.uid() and public.is_current_user_calendar_member(calendar_id)'
     case 'watch_sessions':
     case 'watch_items':
       return 'public.can_edit_calendar(calendar_id)'
@@ -385,10 +396,13 @@ async function assertInsertAllowed(database: LocalDb, user: LocalUser, table: Sy
       condition = '$1::uuid = auth.uid()'
       values = [row.created_by]
       break
-    case 'calendar_items':
     case 'watch_sessions':
     case 'watch_items':
       condition = '$1::uuid = auth.uid() and public.can_edit_calendar($2::uuid)'
+      values = [row.created_by, row.calendar_id]
+      break
+    case 'calendar_items':
+      condition = '$1::uuid = auth.uid() and public.is_current_user_calendar_member($2::uuid)'
       values = [row.created_by, row.calendar_id]
       break
     case 'watch_participants':
@@ -407,6 +421,10 @@ async function assertInsertAllowed(database: LocalDb, user: LocalUser, table: Sy
     case 'user_profiles':
       condition = '$1::uuid = auth.uid()'
       values = [row.user_id]
+      break
+    case 'calendar_view_preferences':
+      condition = '$1::uuid = auth.uid() and public.is_current_user_calendar_member($2::uuid)'
+      values = [row.user_id, row.calendar_id]
       break
     default:
       condition = 'false'
