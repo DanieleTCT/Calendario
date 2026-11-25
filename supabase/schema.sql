@@ -530,6 +530,74 @@ drop policy if exists "Members can delete calendar items" on public.calendar_ite
 create policy "Members can delete calendar items" on public.calendar_items for delete to authenticated
 using (public.can_edit_calendar_item(calendar_id, created_by, editable_by));
 
+create table if not exists public.google_calendar_connections (
+  user_id uuid not null,
+  calendar_id uuid not null,
+  refresh_token_encrypted text not null,
+  access_token_encrypted text,
+  access_token_expires_at timestamptz,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, calendar_id),
+  foreign key (calendar_id, user_id) references public.calendar_members(calendar_id, user_id) on delete cascade
+);
+alter table public.google_calendar_connections
+  add column if not exists access_token_encrypted text,
+  add column if not exists access_token_expires_at timestamptz;
+alter table public.google_calendar_connections enable row level security;
+revoke all on public.google_calendar_connections from public, anon, authenticated;
+grant all on public.google_calendar_connections to service_role;
+
+create table if not exists public.google_calendar_sources (
+  user_id uuid not null,
+  calendar_id uuid not null,
+  google_calendar_id text not null,
+  summary text not null,
+  time_zone text not null default 'UTC',
+  enabled boolean not null default true,
+  sync_token text,
+  last_synced_at timestamptz,
+  primary key (user_id, calendar_id, google_calendar_id),
+  foreign key (calendar_id, user_id) references public.calendar_members(calendar_id, user_id) on delete cascade,
+  check (char_length(google_calendar_id) between 1 and 512),
+  check (char_length(summary) between 1 and 200)
+);
+alter table public.google_calendar_sources enable row level security;
+revoke all on public.google_calendar_sources from public, anon, authenticated;
+grant all on public.google_calendar_sources to service_role;
+
+create table if not exists public.google_calendar_events (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null,
+  calendar_id uuid not null,
+  google_calendar_id text not null,
+  event_id text not null,
+  title text not null check (char_length(title) between 1 and 200),
+  description text not null default '' check (char_length(description) <= 4000),
+  starts_at timestamptz not null,
+  ends_at timestamptz not null,
+  start_date date,
+  end_date date,
+  all_day boolean not null default false,
+  tags text[] not null default '{}',
+  source_url text,
+  updated_at timestamptz not null default now(),
+  unique (user_id, calendar_id, google_calendar_id, event_id),
+  foreign key (calendar_id, user_id) references public.calendar_members(calendar_id, user_id) on delete cascade,
+  check (ends_at >= starts_at),
+  check (all_day = (start_date is not null and end_date is not null)),
+  check (cardinality(tags) <= 12)
+);
+create index if not exists google_calendar_events_view_idx
+  on public.google_calendar_events(user_id, calendar_id, starts_at);
+alter table public.google_calendar_events enable row level security;
+revoke all on public.google_calendar_events from public, anon, authenticated;
+grant select on public.google_calendar_events to authenticated;
+grant all on public.google_calendar_events to service_role;
+drop policy if exists "Users read their private Google Calendar events" on public.google_calendar_events;
+create policy "Users read their private Google Calendar events"
+on public.google_calendar_events for select to authenticated
+using (user_id = (select auth.uid()) and public.is_current_user_calendar_member(calendar_id));
+
 create table if not exists public.calendar_schedule_sources (
   id uuid primary key default gen_random_uuid(),
   calendar_id uuid not null references public.calendars(id) on delete cascade,
@@ -1662,6 +1730,10 @@ create table if not exists public.user_profiles (
   ),
   updated_at timestamptz not null default now()
 );
+
+alter table public.user_profiles
+  add column if not exists interface_theme jsonb not null
+  default '{"mode":"light","accent":"violet","density":"comfortable"}'::jsonb;
 
 alter table public.user_profiles enable row level security;
 revoke all on table public.user_profiles from anon, authenticated;

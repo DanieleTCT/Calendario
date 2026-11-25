@@ -52,7 +52,13 @@ function scheduledFetch(feedUrl, overrides = {}) {
     if (url.pathname === '/rest/v1/calendar_schedule_sources') {
       return Response.json([{ provider: 'polito', feed_url: feedUrl }])
     }
+    if (url.href === overrides.feedRedirect) {
+      return overrides.feedResponse ?? new Response(ical, { headers: { 'content-type': 'text/calendar' } })
+    }
     if (url.href === feedUrl) {
+      if (overrides.feedRedirect) {
+        return new Response(null, { status: 302, headers: { location: overrides.feedRedirect } })
+      }
       return overrides.feedResponse ?? new Response(ical, { headers: { 'content-type': 'text/calendar' } })
     }
     throw new Error('Richiesta inattesa.')
@@ -76,6 +82,25 @@ test('sincronizzazione rifiuta feed fuori dai domini degli atenei', async () => 
   const result = await request({ calendarId, sourceId }, fetcher)
   assert.equal(result.statusCode, 400)
   assert.match(result.body.error, /link iCal HTTPS ufficiale/)
+  assert.equal(calls.some(({ url }) => url.hostname === 'example.test'), false)
+})
+
+test('sincronizzazione segue i redirect verso domini ufficiali PoliTO', async () => {
+  const feedUrl = 'https://my.polito.it/calendar.ics?token=private'
+  const redirectUrl = 'https://www.swas.polito.it/calendar.ics?token=private'
+  const { calls, fetcher } = scheduledFetch(feedUrl, { feedRedirect: redirectUrl })
+  const result = await request({ calendarId, sourceId }, fetcher)
+  assert.equal(result.statusCode, 200)
+  assert.equal(result.body.events.length, 3)
+  assert.equal(calls.at(-1).url.hostname, 'www.swas.polito.it')
+})
+
+test('sincronizzazione blocca i redirect verso domini non ufficiali', async () => {
+  const feedUrl = 'https://my.polito.it/calendar.ics?token=private'
+  const { calls, fetcher } = scheduledFetch(feedUrl, { feedRedirect: 'https://example.test/secret.ics' })
+  const result = await request({ calendarId, sourceId }, fetcher)
+  assert.equal(result.statusCode, 502)
+  assert.match(result.body.error, /dominio non ufficiale/)
   assert.equal(calls.some(({ url }) => url.hostname === 'example.test'), false)
 })
 

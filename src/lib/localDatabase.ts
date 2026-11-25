@@ -64,7 +64,7 @@ const selectableColumns: Record<SyncTable, string[]> = {
   watch_participants: ['session_id', 'calendar_id', 'user_id', 'joined_at', 'sync_updated_at'],
   watch_items: ['id', 'session_id', 'calendar_id', 'title', 'category', 'tags', 'created_by', 'created_at', 'tmdb_id', 'poster_path', 'release_date', 'sync_updated_at'],
   watch_votes: ['session_id', 'item_id', 'user_id', 'liked', 'rating', 'sync_updated_at'],
-  user_profiles: ['user_id', 'bio', 'avatar', 'updated_at', 'sync_updated_at'],
+  user_profiles: ['user_id', 'bio', 'avatar', 'interface_theme', 'updated_at', 'sync_updated_at'],
 }
 
 const insertColumns: Record<SyncTable, string[]> = {
@@ -80,7 +80,7 @@ const insertColumns: Record<SyncTable, string[]> = {
   watch_participants: ['session_id', 'calendar_id', 'user_id'],
   watch_items: ['id', 'session_id', 'calendar_id', 'title', 'category', 'tags', 'created_by', 'tmdb_id', 'poster_path', 'release_date'],
   watch_votes: ['session_id', 'item_id', 'user_id', 'liked', 'rating'],
-  user_profiles: ['user_id', 'bio', 'avatar'],
+  user_profiles: ['user_id', 'bio', 'avatar', 'interface_theme'],
 }
 
 const updateColumns: Record<SyncTable, string[]> = {
@@ -96,7 +96,7 @@ const updateColumns: Record<SyncTable, string[]> = {
   watch_participants: [],
   watch_items: ['title', 'category', 'tags', 'tmdb_id', 'poster_path', 'release_date'],
   watch_votes: ['liked', 'rating'],
-  user_profiles: ['bio', 'avatar'],
+  user_profiles: ['bio', 'avatar', 'interface_theme'],
 }
 
 const rpcSql: Record<string, { params: string[]; sql: string; result: 'rows' | 'scalar' | 'void' }> = {

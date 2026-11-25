@@ -3,6 +3,14 @@ export type CalendarView = 'week' | 'month'
 export type MemberColor = 'violet' | 'blue' | 'coral' | 'green' | 'amber' | 'pink'
 export type EventTexture = 'plain' | 'stripes' | 'dots' | 'grid'
 export type EventBorder = 'solid' | 'dashed' | 'double'
+export type InterfaceThemeMode = 'light' | 'dark'
+export type InterfaceDensity = 'comfortable' | 'compact'
+
+export interface InterfaceTheme {
+  mode: InterfaceThemeMode
+  accent: MemberColor
+  density: InterfaceDensity
+}
 
 export const MEMBER_COLORS: Record<MemberColor, string> = {
   violet: '#7068d8',
@@ -40,6 +48,8 @@ export interface CalendarItem {
   visible_to: string[]
   editable_by: string[]
   tags: string[]
+  source_provider?: string | null
+  source_url?: string | null
 }
 
 export interface CalendarViewPreferences {
@@ -95,4 +105,5 @@ export interface UserProfile {
   user_id: string
   bio: string
   avatar: MiiConfig | null
+  interface_theme?: InterfaceTheme
 }

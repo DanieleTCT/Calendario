@@ -29,6 +29,8 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     await db.exec(`
       create role anon;
       create role authenticated;
+      create role service_role;
+      alter role service_role bypassrls;
       create schema auth;
       create table auth.users (id uuid primary key, email text);
       create function auth.uid() returns uuid language sql stable as $$
@@ -83,6 +85,20 @@ test('schema idempotente e autorizzazioni per calendari, file e Watch-decider', 
     await db.query('select public.join_calendar_with_code($1)', [code])
     await as(viewer)
     await db.query('select public.join_calendar_with_code($1)', [code])
+    await db.exec('reset role')
+    await db.exec('set role service_role')
+    await db.query('insert into public.google_calendar_connections (user_id, calendar_id, refresh_token_encrypted) values ($1, $2, $3)', [owner, calendar, 'encrypted-owner-token'])
+    await db.query(`insert into public.google_calendar_events
+      (user_id, calendar_id, google_calendar_id, event_id, title, starts_at, ends_at, tags)
+      values ($1, $2, 'owner@example.test', 'owner-event', 'Privato Google', now(), now(), array['Google Calendar']),
+             ($3, $2, 'viewer@example.test', 'viewer-event', 'Google personale', now(), now(), array['Google Calendar'])`,
+    [owner, calendar, viewer])
+    await as(viewer)
+    assert.deepEqual((await rows('select title from public.google_calendar_events')).map((row) => row.title), ['Google personale'])
+    await assert.rejects(() => rows('select refresh_token_encrypted from public.google_calendar_connections'))
+    await as(owner)
+    assert.deepEqual((await rows('select title from public.google_calendar_events')).map((row) => row.title), ['Privato Google'])
+    await as(viewer)
     await assert.rejects(() => db.query('select public.get_calendar_invite_code($1)', [calendar]))
     await assert.rejects(() => db.query('select public.get_calendar_edit_invite_code($1)', [calendar]))
     await assert.rejects(() => db.query('select invite_code from public.calendars where id = $1', [calendar]))
@@ -313,6 +329,7 @@ test('profili Mii leggibili solo ai membri dei calendari condivisi e modificabil
     await db.exec(`
       create role anon;
       create role authenticated;
+      create role service_role;
       create schema auth;
       create table auth.users (id uuid primary key, email text);
       create function auth.uid() returns uuid language sql stable as $$
@@ -362,6 +379,11 @@ test('profili Mii leggibili solo ai membri dei calendari condivisi e modificabil
       `insert into public.user_profiles (user_id, bio, avatar) values ($1, 'Ciao', '{"faceShape": 2}'::jsonb)`,
       [owner],
     )
+    assert.deepEqual((await rows('select interface_theme from public.user_profiles where user_id = $1', [owner]))[0].interface_theme, {
+      mode: 'light',
+      accent: 'violet',
+      density: 'comfortable',
+    })
     await assert.rejects(() => db.query(
       `insert into public.user_profiles (user_id, bio) values ($1, 'falso')`,
       [viewer],
@@ -374,10 +396,22 @@ test('profili Mii leggibili solo ai membri dei calendari condivisi e modificabil
     ))
 
     assert.equal((await rows('select bio from public.user_profiles where user_id = $1', [owner]))[0].bio, 'Ciao')
-    await db.query('insert into public.user_profiles (user_id, bio) values ($1, $2)', [viewer, 'Mamma'])
+    await db.query(
+      'insert into public.user_profiles (user_id, bio, interface_theme) values ($1, $2, $3::jsonb)',
+      [viewer, 'Mamma', JSON.stringify({ mode: 'dark', accent: 'blue', density: 'compact' })],
+    )
     await db.query(`update public.user_profiles set bio = 'Mamma felice' where user_id = $1`, [viewer])
     assert.equal((await rows(`update public.user_profiles set bio = 'hack' where user_id = $1 returning user_id`, [owner])).length, 0)
+    assert.equal((await rows(
+      `update public.user_profiles set interface_theme = '{"mode":"dark"}'::jsonb where user_id = $1 returning user_id`,
+      [owner],
+    )).length, 0)
     assert.equal((await rows('select bio from public.user_profiles where user_id = $1', [owner]))[0].bio, 'Ciao')
+    assert.deepEqual((await rows('select interface_theme from public.user_profiles where user_id = $1', [viewer]))[0].interface_theme, {
+      mode: 'dark',
+      accent: 'blue',
+      density: 'compact',
+    })
 
     await as(outsider)
     assert.equal((await rows('select user_id from public.user_profiles')).length, 0)

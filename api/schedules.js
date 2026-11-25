@@ -3,6 +3,7 @@ import ICAL from 'ical.js'
 
 const maxFeedBytes = 4 * 1024 * 1024
 const maxEvents = 2000
+const maxFeedRedirects = 3
 const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function respond(res, status, data) {
@@ -32,9 +33,30 @@ function allowedFeedUrl(value, provider) {
   if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) return null
   const host = url.hostname.toLowerCase()
   const allowedHosts = provider === 'polito'
-    ? new Set(['my.polito.it'])
+    ? new Set(['my.polito.it', 'www.my.polito.it', 'swas.polito.it', 'www.swas.polito.it'])
     : new Set(['my.unito.it', 'unito.prod.up.cineca.it'])
   return allowedHosts.has(host) ? url : null
+}
+
+async function fetchFeed(url, provider, fetcher) {
+  let currentUrl = url
+  for (let redirects = 0; ; redirects += 1) {
+    const response = await fetcher(currentUrl, {
+      headers: { Accept: 'text/calendar, text/plain;q=0.9' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(12000),
+    })
+    if (response.status < 300 || response.status >= 400) return response
+    if (redirects >= maxFeedRedirects) throw new Error('Il feed reindirizza troppe volte.')
+    const location = response.headers.get('location')
+    if (!location) throw new Error('Il feed reindirizza senza indicare una destinazione.')
+    const nextUrl = new URL(location, currentUrl)
+    if (!allowedFeedUrl(nextUrl.toString(), provider)) {
+      throw new Error('Il feed reindirizza a un dominio non ufficiale per questo ateneo.')
+    }
+    await response.body?.cancel()
+    currentUrl = nextUrl
+  }
 }
 
 async function readLimited(response) {
@@ -190,14 +212,7 @@ export async function scheduleHandler(req, res, config, fetcher = fetch) {
     const feedUrl = allowedFeedUrl(source.feed_url, source.provider)
     if (!feedUrl) return respond(res, 400, { error: 'Usa un link iCal HTTPS ufficiale di PoliTO o UniTO.' })
 
-    const feedResponse = await fetcher(feedUrl, {
-      headers: { Accept: 'text/calendar, text/plain;q=0.9' },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(12000),
-    })
-    if (feedResponse.status >= 300 && feedResponse.status < 400) {
-      return respond(res, 400, { error: 'Il link reindirizza: copia dal portale il link iCal HTTPS definitivo.' })
-    }
+    const feedResponse = await fetchFeed(feedUrl, source.provider, fetcher)
     if (!feedResponse.ok) return respond(res, 502, { error: `Il portale universitario ha risposto con HTTP ${feedResponse.status}.` })
     const text = await readLimited(feedResponse)
     if (!text.trimStart().startsWith('BEGIN:VCALENDAR')) return respond(res, 502, { error: 'Il link non ha restituito un feed iCalendar.' })
@@ -214,6 +229,9 @@ export async function scheduleHandler(req, res, config, fetcher = fetch) {
       'Il contenuto ricevuto non è un calendario iCalendar valido.',
       'Il feed contiene troppi eventi nella finestra di sincronizzazione.',
       'Il feed contiene una regola di ricorrenza troppo ampia.',
+      'Il feed reindirizza troppe volte.',
+      'Il feed reindirizza senza indicare una destinazione.',
+      'Il feed reindirizza a un dominio non ufficiale per questo ateneo.',
     ].find((candidate) => candidate === message)
     return respond(res, 502, { error: knownError || 'Impossibile scaricare o interpretare il feed universitario.' })
   }

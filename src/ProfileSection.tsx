@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Pencil, UsersRound } from 'lucide-react'
+import { Palette, Pencil, UsersRound } from 'lucide-react'
 import { MII_DEFAULT, MiiPortrait } from './mii'
 import { MiiEditor } from './MiiEditor'
-import { MEMBER_COLORS, type CalendarMember, type EventBorder, type FamilyCalendar, type MemberColor, type MiiConfig, type UserProfile } from './types'
+import { MEMBER_COLORS, type CalendarMember, type EventBorder, type FamilyCalendar, type InterfaceTheme, type MemberColor, type MiiConfig, type UserProfile } from './types'
 
 const MEMBER_COLOR_LABELS: Record<MemberColor, string> = {
   violet: 'Viola',
@@ -78,7 +78,9 @@ export function ProfileSection({
   userId,
   canEditCalendar,
   saving,
+  interfaceTheme,
   onSave,
+  onSaveInterfaceTheme,
   onSaveMemberAppearance,
 }: {
   calendar: FamilyCalendar
@@ -89,7 +91,9 @@ export function ProfileSection({
   userId: string
   canEditCalendar: boolean
   saving: boolean
+  interfaceTheme: InterfaceTheme
   onSave: (input: { displayName: string; color: MemberColor; styleBorder: EventBorder; allowStyleEditors: boolean; bio: string; avatar: MiiConfig | null }) => Promise<boolean>
+  onSaveInterfaceTheme: (theme: InterfaceTheme) => Promise<boolean>
   onSaveMemberAppearance: (targetUserId: string, color: MemberColor, styleBorder: EventBorder) => Promise<void>
 }) {
   const ownProfile = profiles[userId]
@@ -100,6 +104,8 @@ export function ProfileSection({
   const [bio, setBio] = useState(ownProfile?.bio ?? '')
   const [mii, setMii] = useState<MiiConfig | null>(ownProfile?.avatar ?? null)
   const [editorOpen, setEditorOpen] = useState(false)
+  const [themeDraft, setThemeDraft] = useState(interfaceTheme)
+  const [savingTheme, setSavingTheme] = useState(false)
 
   useEffect(() => {
     setName(currentMember?.display_name ?? '')
@@ -107,6 +113,10 @@ export function ProfileSection({
     setStyleBorder(currentMember?.style_border ?? 'solid')
     setAllowStyleEditors(currentMember?.allow_style_editors ?? true)
   }, [currentMember?.display_name, currentMember?.color, currentMember?.style_border, currentMember?.allow_style_editors])
+
+  useEffect(() => {
+    setThemeDraft(interfaceTheme)
+  }, [interfaceTheme.mode, interfaceTheme.accent, interfaceTheme.density])
 
   const people = useMemo(() => {
     const groups = new Map<string, CalendarMember[]>()
@@ -122,6 +132,15 @@ export function ProfileSection({
     event.preventDefault()
     if (!name.trim()) return
     await onSave({ displayName: name, color, styleBorder, allowStyleEditors, bio: bio.trim(), avatar: mii })
+  }
+
+  const saveTheme = async () => {
+    setSavingTheme(true)
+    try {
+      await onSaveInterfaceTheme(themeDraft)
+    } finally {
+      setSavingTheme(false)
+    }
   }
 
   return (
@@ -161,6 +180,53 @@ export function ProfileSection({
           <button className="primary-button save-button" type="submit" disabled={saving}>Salva profilo</button>
         </div>
       </form>
+
+      <section className="profile-card interface-theme-card">
+        <h3><Palette size={17} /> Aspetto dell'interfaccia</h3>
+        <p>Personalizza colori e densità. Le modifiche valgono solo per il tuo account e si sincronizzano sui tuoi dispositivi.</p>
+        <div className="interface-theme-fields">
+          <label>Tema
+            <select value={themeDraft.mode} onChange={(event) => {
+              const mode = event.target.value
+              if (mode === 'light' || mode === 'dark') setThemeDraft((current) => ({ ...current, mode }))
+            }}>
+              <option value="light">Chiaro</option>
+              <option value="dark">Scuro</option>
+            </select>
+          </label>
+          <label>Densità
+            <select value={themeDraft.density} onChange={(event) => {
+              const density = event.target.value
+              if (density === 'comfortable' || density === 'compact') setThemeDraft((current) => ({ ...current, density }))
+            }}>
+              <option value="comfortable">Spaziosa</option>
+              <option value="compact">Compatta</option>
+            </select>
+          </label>
+          <div className="interface-accent-field">
+            <span>Colore principale</span>
+            <div className="interface-accent-options" role="group" aria-label="Colore principale">
+              {(Object.keys(MEMBER_COLOR_LABELS) as MemberColor[]).map((accent) => (
+                <button
+                  type="button"
+                  key={accent}
+                  className={`interface-accent-option ${themeDraft.accent === accent ? 'accent-selected' : ''}`}
+                  style={{ backgroundColor: MEMBER_COLORS[accent] }}
+                  aria-label={MEMBER_COLOR_LABELS[accent]}
+                  aria-pressed={themeDraft.accent === accent}
+                  title={MEMBER_COLOR_LABELS[accent]}
+                  onClick={() => setThemeDraft((current) => ({ ...current, accent }))}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="profile-footer interface-theme-footer">
+          <button type="button" className="primary-button" disabled={savingTheme || saving} onClick={() => void saveTheme()}>
+            {savingTheme ? 'Salvataggio…' : 'Salva aspetto'}
+          </button>
+        </div>
+      </section>
 
       <section className="profile-card">
         <h3><UsersRound size={16} /> Persone nei tuoi calendari <small>({people.length})</small></h3>

@@ -13,7 +13,7 @@ type FeedEvent = {
 }
 
 const providers: { id: Provider; name: string; instructions: string }[] = [
-  { id: 'polito', name: 'PoliTO', instructions: 'Incolla il link iCal HTTPS generato dalla pagina degli orari di lezione.' },
+  { id: 'polito', name: 'PoliTO', instructions: 'Incolla il link iCal HTTPS del calendario delle lezioni.' },
   { id: 'unito', name: 'UniTO', instructions: 'Incolla il link iCal HTTPS esportato dal calendario del tuo corso o dalla tua area personale.' },
 ]
 
@@ -181,6 +181,15 @@ export function UniversitySchedules({
       return <section className="feature-card" key={provider.id}>
         <h3>{provider.name}</h3>
         <p>{provider.instructions}</p>
+        {provider.id === 'polito' && <div className="schedule-help">
+          <strong>Come trovare il link su MyPoli</strong>
+          <ol>
+            <li>Apri <a href="https://my.polito.it/dotnet/orari_lezione_pub/Default.aspx?culture_language=it-IT" target="_blank" rel="noreferrer">Orari di lezione su MyPoli</a>.</li>
+            <li>Scegli <strong>Consultazione guidata</strong>, imposta anno accademico, sede, tipo di laurea, area e corso, poi premi <strong>Cerca</strong>.</li>
+            <li>Nel calendario del corso individua l’opzione iCal e copia l’indirizzo HTTPS del feed; qui va incollato il link, non il file scaricato.</li>
+          </ol>
+          <p>La pagina pubblica mostra gli orari del corso selezionato, non ricava il piano carriera tramite matricola. Non inserire qui le credenziali PoliTO.</p>
+        </div>}
         {source
           ? <div className="feature-row">
             <span>Feed collegato; URL nascosto.</span>

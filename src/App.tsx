@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent, MouseEvent, PointerEvent } from 'react'
+import type { CSSProperties, FormEvent, MouseEvent, PointerEvent } from 'react'
 import type { AuthChangeEvent, Session, User } from '@supabase/supabase-js'
 import {
   addDays,
@@ -31,6 +31,7 @@ import {
   LoaderCircle,
   LogOut,
   Menu,
+  Music2,
   Plus,
   Settings2,
   Sparkles,
@@ -42,6 +43,7 @@ import {
 import { setActiveDatabaseUser, supabase } from './lib/supabase'
 import { getDatabaseStatus, subscribeDatabaseStatus } from './lib/databaseStatus'
 import { SharedMedia } from './SharedMedia'
+import { GoogleCalendarSettings } from './GoogleCalendarSettings'
 import { UniversitySchedules } from './UniversitySchedules'
 import { WatchDecider } from './WatchDecider'
 import { ProfileSection } from './ProfileSection'
@@ -55,6 +57,7 @@ import {
   type CalendarMember,
   type CalendarView,
   type FamilyCalendar,
+  type InterfaceTheme,
   type MemberColor,
   type EventTexture,
   type MiiConfig,
@@ -62,8 +65,53 @@ import {
 } from './types'
 
 type ItemFilter = 'all' | CalendarItemType
+type GoogleCalendarEventRow = {
+  id: string
+  user_id: string
+  calendar_id: string
+  title: string
+  description: string
+  starts_at: string
+  ends_at: string
+  start_date: string | null
+  end_date: string | null
+  all_day: boolean
+  tags: string[]
+  source_url: string | null
+}
+
+function googleEventAsCalendarItem(row: GoogleCalendarEventRow): CalendarItem {
+  const localDateStart = (value: string | null) => {
+    if (!value) return row.starts_at
+    const [year, month, day] = value.slice(0, 10).split('-').map(Number)
+    return new Date(year, month - 1, day).toISOString()
+  }
+  return {
+    id: row.id,
+    calendar_id: row.calendar_id,
+    title: row.title,
+    description: row.description,
+    item_type: 'event',
+    starts_at: row.all_day ? localDateStart(row.start_date) : row.starts_at,
+    ends_at: row.all_day ? localDateStart(row.end_date) : row.ends_at,
+    all_day: row.all_day,
+    completed: false,
+    assignee_id: row.user_id,
+    created_by: row.user_id,
+    visibility: 'private',
+    visible_to: [],
+    editable_by: [],
+    tags: row.tags,
+    source_provider: 'google',
+    source_url: row.source_url,
+  }
+}
 
 const HOURS = Array.from({ length: 24 }, (_, index) => index)
+const MINUTES = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, '0'))
+const DEFAULT_WEEK_HOUR_HEIGHT = 24
+const MIN_WEEK_HOUR_HEIGHT = 20
+const MAX_WEEK_HOUR_HEIGHT = 44
 const itemLabels: Record<CalendarItemType, string> = {
   event: 'Evento',
   task: 'Task',
@@ -90,6 +138,7 @@ const defaultCategoryStyles: Record<CalendarItemType, CategoryAppearance> = {
   task: { color: 'green', texture: 'dots' },
   lesson: { color: 'amber', texture: 'stripes' },
 }
+const defaultInterfaceTheme: InterfaceTheme = { mode: 'light', accent: 'violet', density: 'comfortable' }
 
 function isMemberColor(value: unknown): value is MemberColor {
   return typeof value === 'string' && memberColorOptions.some(([color]) => color === value)
@@ -97,6 +146,16 @@ function isMemberColor(value: unknown): value is MemberColor {
 
 function isEventTexture(value: unknown): value is EventTexture {
   return typeof value === 'string' && eventTextures.some(([texture]) => texture === value)
+}
+
+function normalizeInterfaceTheme(value: unknown): InterfaceTheme {
+  if (!value || typeof value !== 'object') return defaultInterfaceTheme
+  const theme = value as Partial<InterfaceTheme>
+  return {
+    mode: theme.mode === 'dark' ? 'dark' : 'light',
+    accent: isMemberColor(theme.accent) ? theme.accent : defaultInterfaceTheme.accent,
+    density: theme.density === 'compact' ? 'compact' : 'comfortable',
+  }
 }
 
 function defaultViewPreferences(calendarId: string, userId: string): CalendarViewPreferences {
@@ -185,7 +244,9 @@ function App() {
   const [allMembers, setAllMembers] = useState<CalendarMember[]>([])
   const [profiles, setProfiles] = useState<Record<string, UserProfile>>({})
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [section, setSection] = useState<'calendar' | 'media' | 'watch' | 'schedules' | 'profile'>('calendar')
+  const [section, setSection] = useState<'calendar' | 'media' | 'watch' | 'schedules' | 'google-calendar' | 'profile'>('calendar')
+  const [googleItems, setGoogleItems] = useState<CalendarItem[]>([])
+  const googleEventLoadSequence = useRef(0)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [databaseStatus, setDatabaseStatusState] = useState(getDatabaseStatus)
@@ -197,16 +258,18 @@ function App() {
     : calendar && user ? defaultViewPreferences(calendar.id, user.id) : null
   const currentMember = members.find((member) => member.user_id === user?.id)
   const myMii = user ? profiles[user.id]?.avatar ?? null : null
+  const interfaceTheme = user ? normalizeInterfaceTheme(profiles[user.id]?.interface_theme) : defaultInterfaceTheme
   const canEdit = currentMember?.role === 'owner' || currentMember?.can_edit === true
   const canEditItem = (item: CalendarItem) => Boolean(user && (
-    item.created_by === user.id || item.editable_by?.includes(user.id)
+    item.source_provider !== 'google' && (item.created_by === user.id || item.editable_by?.includes(user.id))
   ))
+  const allCalendarItems = useMemo(() => [...items, ...googleItems], [googleItems, items])
   const selectedItems = useMemo(
     () => {
       const query = filterText.trim().toLocaleLowerCase('it-IT')
       const hiddenItems = activeViewPreferences?.hidden_item_ids ?? []
       const hiddenMembers = activeViewPreferences?.hidden_member_ids ?? []
-      return items.filter((item) =>
+      return allCalendarItems.filter((item) =>
         (filter === 'all' || item.item_type === filter)
         && (memberFilter === null || item.assignee_id === memberFilter)
         && !hiddenItems.includes(item.id)
@@ -215,8 +278,15 @@ function App() {
           .some((value) => value.toLocaleLowerCase('it-IT').includes(query))),
       )
     },
-    [activeViewPreferences, filter, filterText, items, memberFilter],
+    [activeViewPreferences, allCalendarItems, filter, filterText, memberFilter],
   )
+
+  useEffect(() => {
+    const root = document.documentElement
+    root.dataset.theme = interfaceTheme.mode
+    root.dataset.accent = interfaceTheme.accent
+    root.dataset.density = interfaceTheme.density
+  }, [interfaceTheme.mode, interfaceTheme.accent, interfaceTheme.density])
 
   useEffect(() => {
     if (!supabase) {
@@ -248,6 +318,23 @@ function App() {
   }, [])
 
   useEffect(() => subscribeDatabaseStatus(setDatabaseStatusState), [])
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const googleStatus = params.get('google_calendar')
+    if (!googleStatus) return
+    setSection('google-calendar')
+    const linkedCalendarId = params.get('calendar_id')
+    if (linkedCalendarId) setSelectedCalendarId(linkedCalendarId)
+    if (googleStatus === 'connected') setNotice('Account Google collegato. Scegli i calendari da mostrare.')
+    else if (googleStatus === 'denied') setError('Autorizzazione Google annullata.')
+    else if (googleStatus === 'not_configured') setError('Google Calendar non è ancora configurato sul server.')
+    else setError('Collegamento Google Calendar non riuscito. Riprova.')
+    params.delete('google_calendar')
+    params.delete('calendar_id')
+    const query = params.toString()
+    window.history.replaceState({}, '', `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`)
+  }, [])
 
   const loadCalendar = useCallback(async (currentUser: User) => {
     if (!supabase) return
@@ -295,13 +382,14 @@ function App() {
 
       const profileUserIds = [...new Set(allCalendarMembers.map((member) => member.user_id))]
       const profileResult = profileUserIds.length
-        ? await supabase.from('user_profiles').select('user_id, bio, avatar').in('user_id', profileUserIds)
+        ? await supabase.from('user_profiles').select('user_id, bio, avatar, interface_theme').in('user_id', profileUserIds)
         : null
       if (profileResult?.error) throw profileResult.error
       const loadedProfiles = Object.fromEntries((profileResult?.data ?? []).map((row) => [row.user_id, {
         user_id: row.user_id as string,
         bio: (row.bio as string) ?? '',
         avatar: normalizeMii(row.avatar),
+        interface_theme: normalizeInterfaceTheme(row.interface_theme),
       }]))
 
       const [itemsResult, preferencesResult] = await Promise.all([
@@ -355,6 +443,87 @@ function App() {
   const refreshCalendarAfterScheduleSync = useCallback(() => {
     if (user) void loadCalendar(user)
   }, [loadCalendar, user])
+
+  const refreshGoogleCalendarEvents = useCallback(async () => {
+    const request = ++googleEventLoadSequence.current
+    if (!supabase || !calendar || !user) {
+      setGoogleItems([])
+      return
+    }
+    const visibleStart = view === 'week'
+      ? startOfWeek(date, { weekStartsOn: 1 })
+      : startOfWeek(startOfMonth(date), { weekStartsOn: 1 })
+    const visibleEnd = addDays(visibleStart, view === 'week' ? 7 : 42)
+    const from = visibleStart.toISOString()
+    const until = visibleEnd.toISOString()
+    const fromDate = format(visibleStart, 'yyyy-MM-dd')
+    const untilDate = format(visibleEnd, 'yyyy-MM-dd')
+    const [timedResult, allDayResult] = await Promise.all([
+      supabase.from('google_calendar_events').select('*')
+        .eq('calendar_id', calendar.id).eq('user_id', user.id).eq('all_day', false)
+        .lt('starts_at', until).gt('ends_at', from),
+      supabase.from('google_calendar_events').select('*')
+        .eq('calendar_id', calendar.id).eq('user_id', user.id).eq('all_day', true)
+        .lt('start_date', untilDate).gt('end_date', fromDate),
+    ])
+    if (timedResult.error) throw timedResult.error
+    if (allDayResult.error) throw allDayResult.error
+    if (request === googleEventLoadSequence.current) {
+      setGoogleItems([...(timedResult.data ?? []), ...(allDayResult.data ?? [])]
+        .map((row) => googleEventAsCalendarItem(row as GoogleCalendarEventRow)))
+    }
+  }, [calendar, date, user, view])
+
+  useEffect(() => {
+    let active = true
+    let syncRunning = false
+    const syncGoogleCalendar = async () => {
+      if (!supabase || !calendar || !user || syncRunning) return
+      syncRunning = true
+      try {
+        const { data, error: sessionError } = await supabase.auth.getSession()
+        if (sessionError) throw sessionError
+        if (!data.session) return
+        const response = await fetch('/api/google-calendar?action=sync', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${data.session.access_token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ calendarId: calendar.id }),
+        })
+        const result = await response.json() as { connected?: boolean; error?: string; code?: string }
+        if (!response.ok) {
+          if (result.code === 'GOOGLE_CALENDAR_NOT_CONFIGURED') return
+          throw new Error(result.error || `Richiesta non riuscita (HTTP ${response.status}).`)
+        }
+        if (active && result.connected) await refreshGoogleCalendarEvents()
+      } catch (syncError) {
+        if (active) setError(`Sincronizzazione Google Calendar non riuscita: ${readableError(syncError)}`)
+      } finally {
+        syncRunning = false
+      }
+    }
+    const syncWhenVisible = () => {
+      if (document.visibilityState === 'visible') void syncGoogleCalendar()
+    }
+    void syncGoogleCalendar()
+    const timer = window.setInterval(() => { void syncGoogleCalendar() }, 5 * 60 * 1000)
+    document.addEventListener('visibilitychange', syncWhenVisible)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', syncWhenVisible)
+    }
+  }, [calendar, refreshGoogleCalendarEvents, user])
+
+  useEffect(() => {
+    let active = true
+    void refreshGoogleCalendarEvents().catch((loadError: unknown) => {
+      if (active) setError(`Impossibile caricare gli eventi Google Calendar: ${readableError(loadError)}`)
+    })
+    return () => { active = false }
+  }, [refreshGoogleCalendarEvents])
 
   const saveViewPreferences = async (next: CalendarViewPreferences) => {
     if (!supabase || !calendar || !user) return
@@ -717,6 +886,35 @@ function App() {
     }
   }
 
+  const saveInterfaceTheme = async (theme: InterfaceTheme) => {
+    if (!supabase || !user) return false
+    setError('')
+    try {
+      const { error: themeError } = await supabase
+        .from('user_profiles')
+        .upsert({
+          user_id: user.id,
+          interface_theme: theme,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id' })
+      if (themeError) throw themeError
+      setProfiles((current) => ({
+        ...current,
+        [user.id]: {
+          user_id: user.id,
+          bio: current[user.id]?.bio ?? '',
+          avatar: current[user.id]?.avatar ?? null,
+          interface_theme: theme,
+        },
+      }))
+      setNotice('Aspetto aggiornato.')
+      return true
+    } catch (themeError) {
+      setError(`Impossibile salvare il tema: ${readableError(themeError)}`)
+      return false
+    }
+  }
+
   const updateMemberAppearance = async (
     targetUserId: string,
     color: MemberColor,
@@ -854,25 +1052,46 @@ function App() {
           <button className="icon-button sidebar-close" onClick={() => setSidebarOpen(false)} aria-label="Chiudi menu"><X size={18} /></button>
         </div>
 
-        <nav className="sidebar-section" aria-label="Sezioni">
-          {([
-            ['calendar', 'Calendario'],
-            ['schedules', 'Orari universitari'],
-            ['media', 'Audio player'],
-            ['watch', 'Watch-decider'],
-            ['profile', 'Profilo'],
-          ] as const).map(([value, label]) => <button key={value} className={`filter-row ${section === value ? 'filter-selected' : ''}`} onClick={() => { setSection(value); setSidebarOpen(false) }}>{label}</button>)}
+        <nav className="sidebar-navigation" aria-label="Navigazione principale">
+          <button className={`sidebar-nav-link ${section === 'calendar' ? 'sidebar-nav-selected' : ''}`} onClick={() => { setSection('calendar'); setSidebarOpen(false) }}>
+            <CalendarDays size={16} /><span>Calendario</span>
+          </button>
+          <details className="sidebar-nav-group" open>
+            <summary><BookOpen size={16} /><span>Organizza</span></summary>
+            <button className={`sidebar-nav-link ${section === 'schedules' ? 'sidebar-nav-selected' : ''}`} onClick={() => { setSection('schedules'); setSidebarOpen(false) }}>
+              <Clock3 size={15} /><span>Orari universitari</span>
+            </button>
+            <button className={`sidebar-nav-link ${section === 'google-calendar' ? 'sidebar-nav-selected' : ''}`} onClick={() => { setSection('google-calendar'); setSidebarOpen(false) }}>
+              <CalendarDays size={15} /><span>Google Calendar</span>
+            </button>
+          </details>
+          <details className="sidebar-nav-group">
+            <summary><Sparkles size={16} /><span>Tempo libero</span></summary>
+            <button className={`sidebar-nav-link ${section === 'media' ? 'sidebar-nav-selected' : ''}`} onClick={() => { setSection('media'); setSidebarOpen(false) }}>
+              <Music2 size={15} /><span>Audio player</span>
+            </button>
+            <button className={`sidebar-nav-link ${section === 'watch' ? 'sidebar-nav-selected' : ''}`} onClick={() => { setSection('watch'); setSidebarOpen(false) }}>
+              <Eye size={15} /><span>Watch-decider</span>
+            </button>
+          </details>
+          <details className="sidebar-nav-group">
+            <summary><UsersRound size={16} /><span>Account</span></summary>
+            <button className={`sidebar-nav-link ${section === 'profile' ? 'sidebar-nav-selected' : ''}`} onClick={() => { setSection('profile'); setSidebarOpen(false) }}>
+              <Settings2 size={15} /><span>Profilo</span>
+            </button>
+          </details>
         </nav>
-        {section === 'calendar' && <button className="create-button" onClick={() => openNewItem(date)}>
-          <Plus size={19} strokeWidth={2.2} />
-          <span>Crea</span>
-        </button>}
+        {section === 'calendar' && <>
+          <button className="create-button" onClick={() => openNewItem(date)}>
+            <Plus size={19} strokeWidth={2.2} />
+            <span>Crea</span>
+          </button>
 
-        {section === 'calendar' && <MiniCalendar
-          date={date}
-          onDateChange={setDate}
-          onMonthChange={(direction) => setDate((current) => direction === 1 ? addMonths(current, 1) : subMonths(current, 1))}
-        />}
+          <MiniCalendar
+            date={date}
+            onDateChange={setDate}
+            onMonthChange={(direction) => setDate((current) => direction === 1 ? addMonths(current, 1) : subMonths(current, 1))}
+          />
 
         <details className="sidebar-section" open>
           <summary className="section-heading">I miei calendari</summary>
@@ -889,7 +1108,7 @@ function App() {
           ))}
           <button className="filter-row" onClick={() => { setError(''); setSetupOpen(true) }}><Plus size={15} /><span>Crea o aggiungi calendario</span></button>
         </details>
-        {section === 'calendar' && <details className="sidebar-section" open>
+        <details className="sidebar-section">
           <summary className="section-heading">Filtri calendario</summary>
           <button className={`filter-row ${filter === 'all' ? 'filter-selected' : ''}`} onClick={() => setFilter('all')}>
             <span className="color-dot dot-everyone" />
@@ -907,8 +1126,8 @@ function App() {
             <span className="color-dot dot-lesson" />
             <span>Lezioni</span>
           </button>
-        </details>}
-        {section === 'calendar' && activeViewPreferences && <details className="sidebar-section calendar-view-settings">
+        </details>
+        {activeViewPreferences && <details className="sidebar-section calendar-view-settings">
           <summary className="section-heading">La mia visualizzazione</summary>
           <label className="calendar-search"><Tag size={14} /><input value={filterText} onChange={(event) => setFilterText(event.target.value)} placeholder="Cerca tag, titolo o descrizione" /></label>
           <strong className="settings-subheading">Aspetto per categoria</strong>
@@ -929,11 +1148,11 @@ function App() {
             </div>
           })}
           <strong className="settings-subheading">Eventi nascosti</strong>
-          {items.filter((item) => activeViewPreferences.hidden_item_ids.includes(item.id)).length
-            ? items.filter((item) => activeViewPreferences.hidden_item_ids.includes(item.id)).map((item) => <button key={item.id} className="hidden-event-row" onClick={() => toggleHiddenItem(item.id)}><Eye size={14} /><span>{item.title}</span></button>)
+          {allCalendarItems.filter((item) => activeViewPreferences.hidden_item_ids.includes(item.id)).length
+            ? allCalendarItems.filter((item) => activeViewPreferences.hidden_item_ids.includes(item.id)).map((item) => <button key={item.id} className="hidden-event-row" onClick={() => toggleHiddenItem(item.id)}><Eye size={14} /><span>{item.title}</span></button>)
             : <span className="settings-empty">Nessun evento nascosto.</span>}
         </details>}
-        <details className="sidebar-section people-section" open>
+        <details className="sidebar-section people-section">
           <summary className="section-heading">Persone ({members.length})</summary>
           <div className="people-section-head">
             <button
@@ -980,7 +1199,7 @@ function App() {
           ))}
         </details>
 
-        {inviteCode && editInviteCode && <details className="sidebar-section" open>
+        {inviteCode && editInviteCode && <details className="sidebar-section">
           <summary className="section-heading">Invita persone</summary>
           {([['Sola lettura', inviteCode], ['Può modificare', editInviteCode]] as const).map(([label, code]) => <div className="invite-card" key={label}>
           <div className="invite-icon"><UsersRound size={17} /></div>
@@ -1001,6 +1220,7 @@ function App() {
           </div>)}
           <button className="text-button" onClick={() => void rotateInvites()}>Revoca e rigenera i codici</button>
         </details>}
+        </>}
 
         <div className="sidebar-bottom">
           <div className="account-row">
@@ -1024,7 +1244,7 @@ function App() {
               <button className="icon-button" onClick={() => navigate(1)} aria-label="Periodo successivo"><ArrowRight size={18} /></button>
             </div>
             <h1 className="date-heading">{formatMonthHeading(date)}</h1></>}
-            {section !== 'calendar' && <h1 className="date-heading">{section === 'profile' ? 'Profilo' : section === 'schedules' ? 'Orari universitari' : calendar.name}</h1>}
+            {section !== 'calendar' && <h1 className="date-heading">{section === 'profile' ? 'Profilo' : section === 'schedules' ? 'Orari universitari' : section === 'google-calendar' ? 'Google Calendar' : calendar.name}</h1>}
           </div>
           <div className="topbar-actions">
             {dataLoading && <LoaderCircle className="loading-icon" size={18} />}
@@ -1095,6 +1315,11 @@ function App() {
           canEdit={canEdit}
           onSynced={refreshCalendarAfterScheduleSync}
         />}
+        {section === 'google-calendar' && <GoogleCalendarSettings
+          key={calendar.id}
+          calendarId={calendar.id}
+          onSynced={() => { void refreshGoogleCalendarEvents() }}
+        />}
         {section === 'watch' && <WatchDecider key={calendar.id} calendarId={calendar.id} userId={user.id} canEdit={canEdit} members={members} />}
         {section === 'profile' && <ProfileSection
           key={calendar.id}
@@ -1106,7 +1331,9 @@ function App() {
           userId={user.id}
           canEditCalendar={canEdit}
           saving={dataLoading}
+          interfaceTheme={interfaceTheme}
           onSave={saveProfile}
+          onSaveInterfaceTheme={saveInterfaceTheme}
           onSaveMemberAppearance={updateMemberAppearance}
         />}
       </main>
@@ -1301,9 +1528,33 @@ function WeekCalendar({
 }) {
   const timedItems = items.filter((item) => !item.all_day && item.item_type !== 'task')
   const allDayItems = items.filter((item) => item.all_day || item.item_type === 'task')
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const [hourHeight, setHourHeight] = useState(DEFAULT_WEEK_HOUR_HEIGHT)
+  const [now, setNow] = useState(() => new Date())
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    const element = scrollRef.current
+    if (!element) return
+    const updateHourHeight = () => {
+      const available = element.clientHeight - 16
+      if (available <= 0) return
+      const next = Math.max(MIN_WEEK_HOUR_HEIGHT, Math.min(MAX_WEEK_HOUR_HEIGHT, Math.floor(available / 24)))
+      setHourHeight((current) => (current === next ? current : next))
+    }
+    updateHourHeight()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(updateHourHeight)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   return (
-    <div className="week-calendar">
+    <div className="week-calendar" style={{ '--week-hour-height': `${hourHeight}px` } as CSSProperties}>
       <div className="week-header">
         <div className="time-gutter-header">GMT{format(new Date(), 'xxx')}</div>
         {days.map((day) => <div key={day.toISOString()} className={`day-heading ${isToday(day) ? 'day-heading-today' : ''}`}><span>{format(day, 'EEE', { locale: it }).toLocaleUpperCase('it-IT')}</span><strong>{format(day, 'd')}</strong></div>)}
@@ -1314,7 +1565,7 @@ function WeekCalendar({
           {allDayItems.filter((item) => isSameDay(parseISO(item.starts_at), day)).map((item) => <CalendarItemChip key={item.id} item={item} members={members} categoryStyles={categoryStyles} canEditItem={canEditItem} onEdit={onEdit} onToggleTask={onToggleTask} compact />)}
         </div>)}
       </div>
-      <div className="week-scroll">
+      <div className="week-scroll" ref={scrollRef}>
         <div className="time-column">
           {HOURS.map((hour) => <div className="time-label" key={hour}>{format(new Date(2020, 0, 1, hour), 'HH:mm')}</div>)}
           <div className="time-label time-label-end">24:00</div>
@@ -1325,6 +1576,9 @@ function WeekCalendar({
             dayStart.setHours(0, 0, 0, 0)
             const dayEnd = new Date(dayStart)
             dayEnd.setDate(dayEnd.getDate() + 1)
+            const isTodayColumn = isToday(day)
+            const currentHour = now.getHours()
+            const nowTop = (currentHour * 60 + now.getMinutes()) / 60 * hourHeight
             const dayItems = timedItems.filter((item) => {
               const startsAt = parseISO(item.starts_at)
               const endsAt = parseISO(item.ends_at)
@@ -1332,17 +1586,22 @@ function WeekCalendar({
             })
 
             return <div
-              className={`day-column ${isToday(day) ? 'day-column-today' : ''}`}
+              className={`day-column ${isTodayColumn ? 'day-column-today' : ''}`}
               key={day.toISOString()}
               onDoubleClick={(event) => {
                 if (event.target instanceof Element && event.target.closest('.week-event')) return
                 const rect = event.currentTarget.getBoundingClientRect()
                 const offset = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
-                const minuteOfDay = Math.min(23 * 60 + 45, Math.floor(offset / 64 * 4) * 15)
+                const minuteOfDay = Math.min(23 * 60 + 45, Math.floor(offset / hourHeight * 4) * 15)
                 onCreateTimedDraft(day, minuteOfDay)
               }}
             >
-              {HOURS.map((hour) => <div className="hour-cell" key={hour} />)}
+              {HOURS.map((hour) => <div className={`hour-cell ${isTodayColumn && hour === currentHour ? 'hour-cell-current' : ''}`} key={hour} />)}
+              {isTodayColumn && (
+                <div className="current-time-line" style={{ top: `${nowTop}px` }} aria-hidden="true">
+                  <span className="current-time-dot" />
+                </div>
+              )}
               {dayItems.map((item) => {
                 const startsAt = parseISO(item.starts_at)
                 const endsAt = parseISO(item.ends_at)
@@ -1351,14 +1610,15 @@ function WeekCalendar({
                 const segmentEndMinute = endsAt >= dayEnd ? 1440 : endsAt.getHours() * 60 + endsAt.getMinutes()
                 const startTime = startsToday ? startsAt : dayStart
                 const endTime = endsAt >= dayEnd ? dayEnd : endsAt
-                const height = Math.max(15, segmentEndMinute - segmentStartMinute) / 60 * 64
+                const height = Math.max(15, segmentEndMinute - segmentStartMinute) / 60 * hourHeight
                 const person = members.find((member) => member.user_id === (item.assignee_id ?? item.created_by))
                   ?? members.find((member) => member.user_id === item.created_by)
                 return <TimedCalendarEvent
                   key={item.id}
                   item={item}
                   day={day}
-                  top={segmentStartMinute / 60 * 64}
+                  hourHeight={hourHeight}
+                  top={segmentStartMinute / 60 * hourHeight}
                   height={height}
                   startLabel={format(startTime, 'HH:mm')}
                   endLabel={endsAt >= dayEnd ? '24:00' : format(endTime, 'HH:mm')}
@@ -1394,6 +1654,7 @@ function wallMinutesFromDay(day: Date, value: Date) {
 function TimedCalendarEvent({
   item,
   day,
+  hourHeight,
   top,
   height,
   categoryStyle,
@@ -1407,6 +1668,7 @@ function TimedCalendarEvent({
 }: {
   item: CalendarItem
   day: Date
+  hourHeight: number
   top: number
   height: number
   categoryStyle: CategoryAppearance
@@ -1448,7 +1710,7 @@ function TimedCalendarEvent({
   const moveGesture = (event: PointerEvent<HTMLDivElement>) => {
     const active = gesture.current
     if (!active || active.pointerId !== event.pointerId) return
-    const delta = Math.round((event.clientY - active.clientY) / 64 * 4) * 15
+    const delta = Math.round((event.clientY - active.clientY) / hourHeight * 4) * 15
     if (delta === 0) return
     active.moved = true
     let startMinute = active.startMinute
@@ -1508,8 +1770,8 @@ function TimedCalendarEvent({
   return <div
     className={`week-event event-${item.item_type} event-texture-${categoryStyle.texture} event-person-border-${personBorder} ${item.id.startsWith('draft:') ? 'week-event-draft' : ''} ${preview ? 'week-event-dragging' : ''}`}
     style={{
-      top: `${preview ? wallMinutesFromDay(day, preview.startsAt) / 60 * 64 : top}px`,
-      height: `${preview ? (wallMinutesFromDay(day, preview.endsAt) - wallMinutesFromDay(day, preview.startsAt)) / 60 * 64 : height}px`,
+      top: `${preview ? wallMinutesFromDay(day, preview.startsAt) / 60 * hourHeight : top}px`,
+      height: `${preview ? (wallMinutesFromDay(day, preview.endsAt) - wallMinutesFromDay(day, preview.startsAt)) / 60 * hourHeight : height}px`,
       borderLeftColor: borderColor ?? palette.foreground,
       backgroundColor: palette.background,
       color: palette.foreground,
@@ -1711,8 +1973,10 @@ function ItemEditor({
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section className="item-modal" role="dialog" aria-modal="true" aria-labelledby="item-modal-title">
-        <div className="modal-top"><span className="eyebrow">{item && !isDraft ? 'MODIFICA ELEMENTO' : 'NUOVO EVENTO'}</span><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={19} /></button></div>
-        <h2 id="item-modal-title">{item && !isDraft ? 'Aggiorna il calendario' : 'Completa il nuovo evento'}</h2>
+        <div className="modal-top"><span className="eyebrow">{item?.source_provider === 'google' ? 'GOOGLE CALENDAR · SOLA LETTURA' : item && !isDraft ? 'MODIFICA ELEMENTO' : 'NUOVO EVENTO'}</span><button className="icon-button" onClick={onClose} aria-label="Chiudi"><X size={19} /></button></div>
+        <h2 id="item-modal-title">{item?.source_provider === 'google' ? 'Evento importato da Google' : item && !isDraft ? 'Aggiorna il calendario' : 'Completa il nuovo evento'}</h2>
+        {item?.source_provider === 'google' && <p>Per modificare questo evento, aprilo in Google Calendar. Le modifiche verranno sincronizzate automaticamente.</p>}
+        {item?.source_provider === 'google' && item.source_url && <p><a href={item.source_url} target="_blank" rel="noreferrer">Apri evento su Google Calendar</a></p>}
         {!canEdit && <p>Accesso in sola lettura</p>}
         <form onSubmit={(event) => void submit(event)}>
           <fieldset disabled={!canEdit} style={{ border: 0, padding: 0, margin: 0 }}>
@@ -1720,8 +1984,8 @@ function ItemEditor({
           <div className="type-selector" role="group" aria-label="Tipo di elemento">
             {(['event', 'task', 'lesson'] as const).map((type) => <button type="button" className={`type-option ${itemType === type ? `type-active type-${type}` : ''}`} key={type} onClick={() => { setItemType(type); if (type === 'task') setAllDay(true) }}><span className={`type-icon type-icon-${type}`}>{type === 'event' ? <CalendarDays size={15} /> : type === 'task' ? <CheckSquare size={15} /> : <BookOpen size={15} />}</span>{itemLabels[type]}</button>)}
           </div>
-          <label className="modal-field"><span><Clock3 size={16} /> Inizio</span><input type="datetime-local" value={startsAt} onChange={(event) => { setStartsAt(event.target.value); setValidationError('') }} required /></label>
-          {itemType !== 'task' && <label className="modal-field"><span><Clock3 size={16} /> Fine</span><input type="datetime-local" value={endsAt} onChange={(event) => { setEndsAt(event.target.value); setValidationError('') }} required /></label>}
+          <label className="modal-field"><span><Clock3 size={16} /> Inizio</span><DateTime24Input value={startsAt} showTime={!allDay && itemType !== 'task'} onChange={(next) => { setStartsAt(next); setValidationError('') }} required /></label>
+          {itemType !== 'task' && <label className="modal-field"><span><Clock3 size={16} /> Fine</span><DateTime24Input value={endsAt} showTime={!allDay} onChange={(next) => { setEndsAt(next); setValidationError('') }} required /></label>}
           {itemType !== 'task' && <label className="checkbox-field"><input type="checkbox" checked={allDay} onChange={(event) => setAllDay(event.target.checked)} /><span>Tutto il giorno</span></label>}
           <label className="description-field"><span>Assegnato a</span><select value={assigneeId} onChange={(event) => setAssigneeId(event.target.value)}><option value="">Nessuno</option>{members.map((member) => <option key={member.user_id} value={member.user_id}>{memberDisplayName(member)}</option>)}</select></label>
           <label className="description-field"><span>Tag <small>Separati da virgola, max 12</small></span><input value={tagText} onChange={(event) => setTagText(event.target.value)} placeholder="es. famiglia, viaggio, urgente" maxLength={420} /></label>
@@ -1749,6 +2013,56 @@ function ItemEditor({
           </div>
         </form>
       </section>
+    </div>
+  )
+}
+
+function DateTime24Input({
+  value,
+  onChange,
+  required = false,
+  showTime = true,
+}: {
+  value: string
+  onChange: (next: string) => void
+  required?: boolean
+  showTime?: boolean
+}) {
+  const datePart = value.slice(0, 10)
+  const timePart = value.slice(11, 16) || '09:00'
+  const hourPart = timePart.slice(0, 2)
+  const minutePart = timePart.slice(3, 5)
+
+  return (
+    <div className="datetime-24-group">
+      <input
+        type="date"
+        value={datePart}
+        onChange={(event) => onChange(`${event.target.value}T${hourPart}:${minutePart}`)}
+        required={required}
+      />
+      {showTime && (
+        <div className="time-24-selects" aria-label="Orario (formato 24 ore)">
+          <select
+            aria-label="Ora"
+            value={hourPart}
+            onChange={(event) => onChange(`${datePart}T${event.target.value}:${minutePart}`)}
+          >
+            {HOURS.map((hour) => {
+              const label = String(hour).padStart(2, '0')
+              return <option key={label} value={label}>{label}</option>
+            })}
+          </select>
+          <span>:</span>
+          <select
+            aria-label="Minuti"
+            value={minutePart}
+            onChange={(event) => onChange(`${datePart}T${hourPart}:${event.target.value}`)}
+          >
+            {MINUTES.map((minute) => <option key={minute} value={minute}>{minute}</option>)}
+          </select>
+        </div>
+      )}
     </div>
   )
 }
