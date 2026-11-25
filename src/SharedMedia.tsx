@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
-import { createPortal } from 'react-dom'
+import type { FormEvent, KeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import type { RealtimeChannel } from '@supabase/supabase-js'
-import { Heart, Mic, MicOff, Music2, Pause, Phone, PhoneOff, Play, PlayCircle, Radio, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Trash2, UsersRound, Video, VideoOff, Volume2, VolumeX } from 'lucide-react'
+import { Heart, Maximize2, Mic, MicOff, Minimize2, Music2, Pause, Phone, PhoneOff, Play, PlayCircle, Radio, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Trash2, UsersRound, Video, VideoOff, Volume2, VolumeX, X } from 'lucide-react'
 import * as tus from 'tus-js-client'
 import { supabase } from './lib/supabase'
 
@@ -38,7 +37,6 @@ type CallPeer = {
   stream: MediaStream | null
 }
 type NetworkPriority = 'movie' | 'balanced' | 'call'
-type DocumentPipApi = { requestWindow: (options?: { width?: number; height?: number }) => Promise<Window> }
 
 const bucket = 'family-shared'
 const resumableUploadThreshold = 6 * 1024 * 1024
@@ -108,10 +106,15 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
   const [cameraEnabled, setCameraEnabled] = useState(true)
   const [speakerEnabled, setSpeakerEnabled] = useState(true)
   const [networkPriority, setNetworkPriority] = useState<NetworkPriority>('balanced')
-  const [pipSupported, setPipSupported] = useState(false)
-  const [pipWindow, setPipWindow] = useState<Window | null>(null)
-  const [pipTarget, setPipTarget] = useState<HTMLElement | null>(null)
-  const [pipFallback, setPipFallback] = useState(false)
+  const [overlayVisible, setOverlayVisible] = useState(true)
+  const [overlayIncludeSelf, setOverlayIncludeSelf] = useState(true)
+  const [overlayPosition, setOverlayPosition] = useState<'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'custom'>('top-right')
+  const [overlayCustomPos, setOverlayCustomPos] = useState({ xPct: 70, yPct: 4 })
+  const [overlayWidthPct, setOverlayWidthPct] = useState(28)
+  const [overlayOpacity, setOverlayOpacity] = useState(92)
+  const [isStageFullscreen, setIsStageFullscreen] = useState(false)
+  const liveStageRef = useRef<HTMLDivElement>(null)
+  const overlayDragRef = useRef<{ pointerId: number; startX: number; startY: number; originXPct: number; originYPct: number; stageWidth: number; stageHeight: number } | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
@@ -140,7 +143,6 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
   const callConnectionsRef = useRef(new Map<string, RTCPeerConnection>())
   const pendingCallCandidatesRef = useRef(new Map<string, RTCIceCandidateInit[]>())
   const callPeersRef = useRef<CallPeer[]>([])
-  const pipWindowRef = useRef<Window | null>(null)
   callNameRef.current = memberName
   networkPriorityRef.current = networkPriority
 
@@ -270,64 +272,6 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
     return connection
   }, [closeCallConnection, removeCallPeer, sendCallSignal, updateCallPeer])
 
-  const closeCallPictureInPicture = useCallback(() => {
-    const pip = pipWindowRef.current
-    pipWindowRef.current = null
-    if (pip && !pip.closed) pip.close()
-    setPipWindow(null)
-    setPipTarget(null)
-    setPipFallback(false)
-  }, [])
-
-  const toggleCallPictureInPicture = async () => {
-    if (pipWindowRef.current || pipFallback) {
-      closeCallPictureInPicture()
-      return
-    }
-    const api = (window as Window & { documentPictureInPicture?: DocumentPipApi }).documentPictureInPicture
-    if (!api) {
-      setPipFallback(true)
-      setActiveTab('live')
-      setNotice('PiP del browser non disponibile: la chiamata è in una finestra flottante sulla pagina.')
-      return
-    }
-    try {
-      const pip = await api.requestWindow({ width: 360, height: 480 })
-      pip.document.title = 'Chiamata — Family'
-      pip.document.body.style.margin = '0'
-      pip.document.body.style.background = '#f7f8fc'
-      for (const stylesheet of document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')) {
-        const link = pip.document.createElement('link')
-        link.rel = 'stylesheet'
-        link.href = stylesheet.href
-        pip.document.head.append(link)
-      }
-      for (const stylesheet of document.querySelectorAll<HTMLStyleElement>('style')) {
-        const style = pip.document.createElement('style')
-        style.textContent = stylesheet.textContent
-        pip.document.head.append(style)
-      }
-      const target = pip.document.createElement('div')
-      target.className = 'media-call-pip-root'
-      pip.document.body.append(target)
-      pipWindowRef.current = pip
-      setPipWindow(pip)
-      setPipTarget(target)
-      setPipFallback(false)
-      pip.addEventListener('pagehide', () => {
-        if (pipWindowRef.current !== pip) return
-        pipWindowRef.current = null
-        setPipWindow(null)
-        setPipTarget(null)
-      }, { once: true })
-      setActiveTab('live')
-    } catch (pipError) {
-      setNotice(`PiP nativo non disponibile: ${pipError instanceof Error ? pipError.message : 'uso la finestra nella pagina'}`)
-      setPipFallback(true)
-      setActiveTab('live')
-    }
-  }
-
   const stopCall = useCallback(() => {
     if (callActiveRef.current) {
       void sendCallSignal({ type: 'leave', from: peerIdRef.current })
@@ -344,8 +288,7 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
     for (const peerId of callConnectionsRef.current.keys()) closeCallConnection(peerId)
     callPeersRef.current = []
     setCallPeers([])
-    closeCallPictureInPicture()
-  }, [closeCallConnection, closeCallPictureInPicture, sendCallSignal])
+  }, [closeCallConnection, sendCallSignal])
 
   const handleCallSignal = useCallback(async (payload: unknown) => {
     if (!payload || typeof payload !== 'object') return
@@ -593,9 +536,6 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
       callActiveRef.current = false
       localCallStreamRef.current?.getTracks().forEach((track) => track.stop())
       localCallStreamRef.current = null
-      const pip = pipWindowRef.current
-      pipWindowRef.current = null
-      if (pip && !pip.closed) pip.close()
       for (const peerId of callConnectionsRef.current.keys()) closeCallConnection(peerId)
       callPeersRef.current = []
       channelRef.current = null
@@ -618,7 +558,11 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
   }, [volume])
 
   useEffect(() => {
-    setPipSupported(Boolean((window as Window & { documentPictureInPicture?: DocumentPipApi }).documentPictureInPicture))
+    const onFullscreenChange = () => {
+      setIsStageFullscreen(document.fullscreenElement === liveStageRef.current)
+    }
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
   }, [])
 
   useEffect(() => {
@@ -1213,6 +1157,70 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
     event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex]?.focus()
   }
 
+  const hasLiveVideo = Boolean(streamMode || remoteStream)
+
+  const beginOverlayDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return
+    if (event.target instanceof Element && event.target.closest('button')) return
+    const stage = liveStageRef.current
+    if (!stage) return
+    const stageRect = stage.getBoundingClientRect()
+    const overlayRect = event.currentTarget.closest('.live-call-overlay')?.getBoundingClientRect()
+    const originXPct = overlayPosition === 'custom'
+      ? overlayCustomPos.xPct
+      : overlayRect && stageRect.width > 0
+        ? ((overlayRect.left - stageRect.left) / stageRect.width) * 100
+        : 65
+    const originYPct = overlayPosition === 'custom'
+      ? overlayCustomPos.yPct
+      : overlayRect && stageRect.height > 0
+        ? ((overlayRect.top - stageRect.top) / stageRect.height) * 100
+        : 4
+    event.currentTarget.setPointerCapture(event.pointerId)
+    overlayDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originXPct,
+      originYPct,
+      stageWidth: Math.max(1, stageRect.width),
+      stageHeight: Math.max(1, stageRect.height),
+    }
+  }
+
+  const moveOverlayDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const active = overlayDragRef.current
+    if (!active || active.pointerId !== event.pointerId) return
+    const dxPct = ((event.clientX - active.startX) / active.stageWidth) * 100
+    const dyPct = ((event.clientY - active.startY) / active.stageHeight) * 100
+    const maxX = Math.max(5, 100 - overlayWidthPct)
+    setOverlayPosition('custom')
+    setOverlayCustomPos({
+      xPct: Math.max(1, Math.min(maxX, active.originXPct + dxPct)),
+      yPct: Math.max(1, Math.min(78, active.originYPct + dyPct)),
+    })
+  }
+
+  const endOverlayDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const active = overlayDragRef.current
+    if (!active || active.pointerId !== event.pointerId) return
+    overlayDragRef.current = null
+  }
+
+  const toggleStageFullscreen = async () => {
+    const stage = liveStageRef.current
+    if (!stage) return
+    try {
+      if (document.fullscreenElement === stage) {
+        await document.exitFullscreen()
+      } else {
+        await stage.requestFullscreen()
+      }
+    } catch {
+      setNotice('Schermo intero non disponibile in questo browser.')
+    }
+  }
+
   return <section className="feature-page">
     <header className="feature-hero"><span className="feature-kicker">IL VOSTRO SPAZIO</span><h2>Audio player condiviso</h2><p>Una libreria audio e una playlist sincronizzata per il gruppo.</p></header>
     {error && <p className="form-message form-error" role="alert">{error}</p>}
@@ -1363,16 +1371,120 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
         <button disabled={Boolean(streamHost && streamHost.peerId !== peerIdRef.current)} onClick={() => void startDisplayStreaming()}>Condividi scheda o schermo</button>
         <p>Scegli una scheda, una finestra o l’intero schermo nel selettore del browser. Se condividi una scheda, la cattura può continuare mentre usi un’altra app; audio e comportamento dipendono dal browser e dalla scelta effettuata.</p>
       </div>}
-      {streamMode && <><p>Stai trasmettendo: <strong>{hostTitleRef.current}</strong>{streamMode === 'file' ? '. Lascia aperta questa pagina e avvia la riproduzione nel lettore.' : '. Puoi passare a un’altra scheda o app; la condivisione resta attiva finché non la interrompi.'}</p>
-        <video ref={hostMediaRef} src={streamMode === 'file' ? streamUrl : undefined} muted={streamMode === 'display'} autoPlay={streamMode === 'display'} controls={streamMode === 'file'} playsInline onLoadedMetadata={captureHostStream} />
-        <button onClick={stopStreaming}>Interrompi streaming</button>
-      </>}
+      {streamMode && <p>Stai trasmettendo: <strong>{hostTitleRef.current}</strong>{streamMode === 'file' ? '. Lascia aperta questa pagina e avvia la riproduzione nel lettore.' : '. Puoi passare a un’altra scheda o app; la condivisione resta attiva finché non la interrompi.'}</p>}
+      {watchingStream && !remoteStream && <p role="status">Connessione all’host in corso…</p>}
+      {(streamMode || remoteStream) && (
+        <div className="live-video-stage" ref={liveStageRef}>
+          {streamMode && (
+            <video
+              ref={hostMediaRef}
+              src={streamMode === 'file' ? streamUrl : undefined}
+              muted={streamMode === 'display'}
+              autoPlay={streamMode === 'display'}
+              controls={streamMode === 'file'}
+              controlsList="nofullscreen"
+              playsInline
+              onLoadedMetadata={captureHostStream}
+            />
+          )}
+          {remoteStream && <video ref={remoteMediaRef} controls controlsList="nofullscreen" playsInline />}
+          <button
+            type="button"
+            className="live-fullscreen-btn"
+            onClick={() => void toggleStageFullscreen()}
+            title={isStageFullscreen ? 'Esci da schermo intero' : 'Schermo intero con telecamere'}
+            aria-label={isStageFullscreen ? 'Esci da schermo intero' : 'Schermo intero'}
+          >
+            {isStageFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+          </button>
+          {inCall && overlayVisible && (
+            <div
+              className={`live-call-overlay live-call-pos-${overlayPosition}`}
+              style={{
+                width: `${overlayWidthPct}%`,
+                opacity: overlayOpacity / 100,
+                ...(overlayPosition === 'custom'
+                  ? { left: `${overlayCustomPos.xPct}%`, top: `${overlayCustomPos.yPct}%` }
+                  : {}),
+              }}
+              aria-label="Partecipanti chiamata in sovraimpressione"
+            >
+              <div
+                className="live-call-overlay-bar"
+                onPointerDown={beginOverlayDrag}
+                onPointerMove={moveOverlayDrag}
+                onPointerUp={endOverlayDrag}
+                onPointerCancel={endOverlayDrag}
+              >
+                <span>Chiamata · {callPeers.length + 1}/{maxCallParticipants}</span>
+                <div className="live-call-overlay-mini-actions">
+                  <button type="button" title={micEnabled ? 'Disattiva microfono' : 'Attiva microfono'} onClick={() => toggleCallTrack('audio')}>{micEnabled ? <Mic size={13} /> : <MicOff size={13} />}</button>
+                  <button type="button" title={cameraEnabled ? 'Disattiva videocamera' : 'Attiva videocamera'} onClick={() => toggleCallTrack('video')}>{cameraEnabled ? <Video size={13} /> : <VideoOff size={13} />}</button>
+                  <button type="button" title="Nascondi telecamere" onClick={() => setOverlayVisible(false)}><X size={13} /></button>
+                </div>
+              </div>
+              <CallStage
+                memberName={memberName}
+                localStream={localCallStream}
+                peers={callPeers}
+                cameraEnabled={cameraEnabled}
+                micEnabled={micEnabled}
+                speakerEnabled={speakerEnabled}
+                includeSelf={overlayIncludeSelf}
+                compact
+              />
+            </div>
+          )}
+        </div>
+      )}
+      {streamMode && <div className="feature-row"><button onClick={stopStreaming}>Interrompi streaming</button></div>}
       {!streamMode && streamHost && streamHost.peerId !== peerIdRef.current && <div className="feature-row">
         <span>In diretta: {streamHost.title}</span>
         {!watchingStream ? <button onClick={joinStream}>Guarda lo streaming</button> : <button onClick={leaveStream}>Esci dallo streaming</button>}
       </div>}
-      {watchingStream && !remoteStream && <p role="status">Connessione all’host in corso…</p>}
-      {remoteStream && <video ref={remoteMediaRef} controls playsInline />}
+      {inCall && hasLiveVideo && (
+        <div className="live-overlay-controls" aria-label="Controlli sovraimpressione chiamata">
+          <div className="live-overlay-toggles">
+            <button type="button" className={overlayVisible ? 'primary-button' : ''} onClick={() => setOverlayVisible((v) => !v)}>
+              {overlayVisible ? <Video size={15} /> : <VideoOff size={15} />}
+              {overlayVisible ? 'Nascondi telecamere' : 'Mostra telecamere'}
+            </button>
+            <label className="live-overlay-check">
+              <input type="checkbox" checked={overlayIncludeSelf} onChange={(event) => setOverlayIncludeSelf(event.target.checked)} />
+              <span>Mostra anche te</span>
+            </label>
+          </div>
+          {overlayVisible && (
+            <div className="live-overlay-sliders">
+              <div className="live-overlay-positions" role="group" aria-label="Posizione telecamere">
+                {([
+                  ['top-left', 'Alto sx'],
+                  ['top-right', 'Alto dx'],
+                  ['bottom-left', 'Basso sx'],
+                  ['bottom-right', 'Basso dx'],
+                ] as const).map(([pos, label]) => (
+                  <button
+                    key={pos}
+                    type="button"
+                    className={overlayPosition === pos ? 'live-pos-active' : ''}
+                    onClick={() => setOverlayPosition(pos)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <label>
+                <span>Dimensione ({overlayWidthPct}%)</span>
+                <input type="range" min={16} max={55} value={overlayWidthPct} onChange={(event) => setOverlayWidthPct(Number(event.target.value))} />
+              </label>
+              <label>
+                <span>Opacità ({overlayOpacity}%)</span>
+                <input type="range" min={25} max={100} value={overlayOpacity} onChange={(event) => setOverlayOpacity(Number(event.target.value))} />
+              </label>
+            </div>
+          )}
+        </div>
+      )}
       <p>La connessione usa WebRTC diretto; alcune reti o browser possono impedirla. La riproduzione e il punto di avanzamento sono controllati dall’host.</p>
     </div>
     </section>
@@ -1382,8 +1494,8 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
           <div><h3>Chiamata del gruppo</h3><p>Parlate mentre guardate un video; la riproduzione resta attiva passando tra le schede.</p></div>
           <span className="count-pill"><UsersRound size={14} /> {inCall ? callPeers.length + 1 : 0}/{maxCallParticipants}</span>
         </div>
-        {inCall ? (pipWindow || pipFallback
-          ? <p className="media-call-popout-note">La chiamata è nella finestra picture-in-picture. Puoi continuare a guardare il film in questa scheda.</p>
+        {inCall ? (activeTab === 'live' && hasLiveVideo && overlayVisible
+          ? <p className="media-call-popout-note">La chiamata è in sovraimpressione nel riproduttore video della scheda Diretta.</p>
           : <CallStage memberName={memberName} localStream={localCallStream} peers={callPeers} cameraEnabled={cameraEnabled} micEnabled={micEnabled} speakerEnabled={speakerEnabled} />) : <div className="media-call-empty">
           <div className="media-call-empty-icon"><Phone size={25} /></div>
           <strong>Una chiamata, senza uscire dal film</strong>
@@ -1391,16 +1503,12 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
           <button className="primary-button" disabled={!channelReady} onClick={() => void startCall()}><Phone size={16} />{channelReady ? 'Entra nella chiamata' : 'Connessione al canale…'}</button>
         </div>}
         {inCall && <CallControls
-          compact={false}
           micEnabled={micEnabled}
           cameraEnabled={cameraEnabled}
           speakerEnabled={speakerEnabled}
-          pipActive={Boolean(pipWindow || pipFallback)}
-          pipSupported={pipSupported}
           onMic={() => toggleCallTrack('audio')}
           onCamera={() => toggleCallTrack('video')}
           onSpeaker={() => setSpeakerEnabled((enabled) => !enabled)}
-          onPictureInPicture={() => void toggleCallPictureInPicture()}
           onHangup={stopCall}
         />}
         <label className="media-call-quality">Priorità banda in uscita
@@ -1416,43 +1524,6 @@ export function SharedMedia({ calendarId, canEdit, memberName, userId }: { calen
         <p className="media-call-note">La qualità imposta un limite massimo al video inviato da questo dispositivo, non garantisce banda minima. Chiamata peer-to-peer fino a {maxCallParticipants} persone; alcune reti possono impedire la connessione diretta. Audio e video sono trasmessi agli altri partecipanti, non registrati né salvati dall’app. Usa microfono e videocamera solo con il consenso delle persone presenti.</p>
       </div>
     </section>
-    {inCall && pipFallback && <aside className="media-call-floating" aria-label="Chiamata flottante">
-      <div className="media-call-floating-heading"><strong>Chiamata · {callPeers.length + 1}/{maxCallParticipants}</strong><button className="icon-button" aria-label="Chiudi finestra flottante" onClick={closeCallPictureInPicture}><PhoneOff size={16} /></button></div>
-      <CallStage memberName={memberName} localStream={localCallStream} peers={callPeers} cameraEnabled={cameraEnabled} micEnabled={micEnabled} speakerEnabled={speakerEnabled} compact />
-      <CallControls
-        compact
-        micEnabled={micEnabled}
-        cameraEnabled={cameraEnabled}
-        speakerEnabled={speakerEnabled}
-        pipActive
-        pipSupported={false}
-        onMic={() => toggleCallTrack('audio')}
-        onCamera={() => toggleCallTrack('video')}
-        onSpeaker={() => setSpeakerEnabled((enabled) => !enabled)}
-        onPictureInPicture={closeCallPictureInPicture}
-        onHangup={stopCall}
-      />
-    </aside>}
-    {inCall && pipTarget && createPortal(
-      <div className="media-call-pip-window">
-        <div className="media-call-floating-heading"><strong>Chiamata · {callPeers.length + 1}/{maxCallParticipants}</strong><button className="icon-button" aria-label="Chiudi picture-in-picture" onClick={closeCallPictureInPicture}><PhoneOff size={16} /></button></div>
-        <CallStage memberName={memberName} localStream={localCallStream} peers={callPeers} cameraEnabled={cameraEnabled} micEnabled={micEnabled} speakerEnabled={speakerEnabled} compact />
-        <CallControls
-          compact
-          micEnabled={micEnabled}
-          cameraEnabled={cameraEnabled}
-          speakerEnabled={speakerEnabled}
-          pipActive
-          pipSupported
-          onMic={() => toggleCallTrack('audio')}
-          onCamera={() => toggleCallTrack('video')}
-          onSpeaker={() => setSpeakerEnabled((enabled) => !enabled)}
-          onPictureInPicture={closeCallPictureInPicture}
-          onHangup={stopCall}
-        />
-      </div>,
-      pipTarget,
-    )}
   </section>
 }
 
@@ -1463,6 +1534,7 @@ function CallStage({
   cameraEnabled,
   micEnabled,
   speakerEnabled,
+  includeSelf = true,
   compact = false,
 }: {
   memberName: string
@@ -1471,30 +1543,41 @@ function CallStage({
   cameraEnabled: boolean
   micEnabled: boolean
   speakerEnabled: boolean
+  includeSelf?: boolean
   compact?: boolean
 }) {
-  const localVideoRef = useRef<HTMLVideoElement>(null)
+  const localVideoRef = useRef<HTMLVideoElement | null>(null)
   const peerVideoRefs = useRef(new Map<string, HTMLVideoElement>())
 
-  useEffect(() => {
-    if (localVideoRef.current) localVideoRef.current.srcObject = localStream
+  const attachLocalVideo = useCallback((element: HTMLVideoElement | null) => {
+    localVideoRef.current = element
+    if (!element || !localStream) return
+    if (element.srcObject !== localStream) element.srcObject = localStream
+    void element.play().catch(() => undefined)
   }, [localStream])
+
+  useEffect(() => {
+    const element = localVideoRef.current
+    if (!element) return
+    if (element.srcObject !== localStream) element.srcObject = localStream
+    if (localStream) void element.play().catch(() => undefined)
+  }, [localStream, includeSelf, cameraEnabled])
 
   useEffect(() => {
     for (const peer of peers) {
       const video = peerVideoRefs.current.get(peer.peerId)
       if (!video || !peer.stream) continue
-      video.srcObject = peer.stream
+      if (video.srcObject !== peer.stream) video.srcObject = peer.stream
       void video.play().catch(() => undefined)
     }
   }, [peers])
 
   return <div className={`media-call-grid ${compact ? 'media-call-grid-compact' : ''}`}>
-    <article className="media-call-tile media-call-self">
-      {localStream && <video ref={localVideoRef} className={!cameraEnabled ? 'media-call-video-hidden' : ''} autoPlay muted playsInline />}
+    {includeSelf && <article className="media-call-tile media-call-self">
+      {localStream && <video ref={attachLocalVideo} className={!cameraEnabled ? 'media-call-video-hidden' : ''} autoPlay muted playsInline />}
       {!cameraEnabled && <div className="media-call-placeholder"><VideoOff size={compact ? 20 : 28} /><span>Videocamera disattivata</span></div>}
       <div className="media-call-tile-label"><span>{memberName} (tu)</span>{micEnabled ? <Mic size={compact ? 13 : 15} /> : <MicOff size={compact ? 13 : 15} />}</div>
-    </article>
+    </article>}
     {peers.map((peer) => <article className="media-call-tile" key={peer.peerId}>
       {peer.stream && <video ref={(element) => {
         if (element) peerVideoRefs.current.set(peer.peerId, element)
@@ -1503,41 +1586,32 @@ function CallStage({
       {(!peer.videoEnabled || !peer.stream) && <div className="media-call-placeholder"><VideoOff size={compact ? 20 : 28} /><span>{peer.stream ? 'Videocamera disattivata' : 'Connessione in corso…'}</span></div>}
       <div className="media-call-tile-label"><span>{peer.name}</span>{peer.audioEnabled ? <Mic size={compact ? 13 : 15} /> : <MicOff size={compact ? 13 : 15} />}</div>
     </article>)}
-    {peers.length === 0 && !compact && <p className="media-call-waiting">Sei in chiamata. Gli altri membri possono unirsi dalla scheda Chiamata.</p>}
+    {!includeSelf && peers.length === 0 && <p className="media-call-waiting">In attesa di altri partecipanti in chiamata…</p>}
+    {includeSelf && peers.length === 0 && !compact && <p className="media-call-waiting">Sei in chiamata. Gli altri membri possono unirsi dalla scheda Chiamata.</p>}
   </div>
 }
 
 function CallControls({
-  compact = false,
   micEnabled,
   cameraEnabled,
   speakerEnabled,
-  pipActive,
-  pipSupported,
   onMic,
   onCamera,
   onSpeaker,
-  onPictureInPicture,
   onHangup,
 }: {
-  compact?: boolean
   micEnabled: boolean
   cameraEnabled: boolean
   speakerEnabled: boolean
-  pipActive: boolean
-  pipSupported: boolean
   onMic: () => void
   onCamera: () => void
   onSpeaker: () => void
-  onPictureInPicture: () => void
   onHangup: () => void
 }) {
-  const pipLabel = pipActive ? 'Chiudi finestra PiP' : pipSupported ? 'Apri Picture in Picture' : 'Finestra flottante'
-  return <div className={`media-call-controls ${compact ? 'media-call-controls-compact' : ''}`}>
-    <button aria-pressed={!micEnabled} onClick={onMic}>{micEnabled ? <Mic size={17} /> : <MicOff size={17} />}{!compact && (micEnabled ? 'Microfono' : 'Microfono disattivato')}</button>
-    <button aria-pressed={!cameraEnabled} onClick={onCamera}>{cameraEnabled ? <Video size={17} /> : <VideoOff size={17} />}{!compact && (cameraEnabled ? 'Videocamera' : 'Videocamera disattivata')}</button>
-    <button aria-pressed={!speakerEnabled} onClick={onSpeaker}>{speakerEnabled ? <Volume2 size={17} /> : <VolumeX size={17} />}{!compact && (speakerEnabled ? 'Altoparlanti' : 'Audio disattivato')}</button>
-    <button aria-pressed={pipActive} onClick={onPictureInPicture}><Phone size={17} />{!compact && pipLabel}</button>
-    <button className="media-call-hangup" onClick={onHangup}><PhoneOff size={17} />{!compact && 'Esci'}</button>
+  return <div className="media-call-controls">
+    <button aria-pressed={!micEnabled} onClick={onMic}>{micEnabled ? <Mic size={17} /> : <MicOff size={17} />}{micEnabled ? 'Microfono' : 'Microfono disattivato'}</button>
+    <button aria-pressed={!cameraEnabled} onClick={onCamera}>{cameraEnabled ? <Video size={17} /> : <VideoOff size={17} />}{cameraEnabled ? 'Videocamera' : 'Videocamera disattivata'}</button>
+    <button aria-pressed={!speakerEnabled} onClick={onSpeaker}>{speakerEnabled ? <Volume2 size={17} /> : <VolumeX size={17} />}{speakerEnabled ? 'Altoparlanti' : 'Audio disattivato'}</button>
+    <button className="media-call-hangup" onClick={onHangup}><PhoneOff size={17} />Esci</button>
   </div>
 }

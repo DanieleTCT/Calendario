@@ -477,8 +477,9 @@ function App() {
   useEffect(() => {
     let active = true
     let syncRunning = false
+    let googleCalendarConfigured = true
     const syncGoogleCalendar = async () => {
-      if (!supabase || !calendar || !user || syncRunning) return
+      if (!supabase || !calendar || !user || syncRunning || !googleCalendarConfigured) return
       syncRunning = true
       try {
         const { data, error: sessionError } = await supabase.auth.getSession()
@@ -494,7 +495,10 @@ function App() {
         })
         const result = await response.json() as { connected?: boolean; error?: string; code?: string }
         if (!response.ok) {
-          if (result.code === 'GOOGLE_CALENDAR_NOT_CONFIGURED') return
+          if (result.code === 'GOOGLE_CALENDAR_NOT_CONFIGURED') {
+            googleCalendarConfigured = false
+            return
+          }
           throw new Error(result.error || `Richiesta non riuscita (HTTP ${response.status}).`)
         }
         if (active && result.connected) await refreshGoogleCalendarEvents()
@@ -1273,7 +1277,9 @@ function App() {
           </div>
         )}
 
+        <div className="section-stage" key={section}>
         {section === 'calendar' && <section className="calendar-content">
+          <div className="calendar-view-stage" key={view}>
           {view === 'week' ? (
             <WeekCalendar
               days={weekDays}
@@ -1300,6 +1306,7 @@ function App() {
               onToggleTask={toggleTask}
             />
           )}
+          </div>
         </section>}
         {section === 'media' && <SharedMedia
           key={calendar.id}
@@ -1336,6 +1343,7 @@ function App() {
           onSaveInterfaceTheme={saveInterfaceTheme}
           onSaveMemberAppearance={updateMemberAppearance}
         />}
+        </div>
       </main>
 
       {editorItem !== undefined && (
